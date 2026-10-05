@@ -244,6 +244,31 @@ async function discoverApp(cfg, log = console.log){
       qData: { title: "/qMetaDef/title", expr: "/qMeasure/qDef" } } })).qMeasureList.qItems;
     log(`Medidas mestras (${measures.length}):`);
     measures.filter(m => /pedido|fatur|valor|canc/i.test(m.qData.title || "")).forEach(m => log(`  - ${m.qInfo.qId} "${m.qData.title}" = ${m.qData.expr}`));
+    // Amostra dos pedidos: formato de DATA_EMISSAO, COD_CLIENTE e valores.
+    try{
+      const amostra = await app.createSessionObject({ qInfo: { qType: "pipeline-amostra" }, qHyperCubeDef: {
+        qDimensions: [{ qDef: { qFieldDefs: ["DATA_EMISSAO"], qSortCriterias: [{ qSortByNumeric: -1 }] } },
+          { qDef: { qFieldDefs: ["COD_CLIENTE"] } }, { qDef: { qFieldDefs: ["CD_PEDIDO"] } }],
+        qMeasures: [{ qDef: { qDef: "Sum(VL_TOTAL)" } }],
+        qInterColumnSortOrder: [0, 1, 2, 3], qSuppressZero: true,
+        qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: 4, qHeight: 8 }] } });
+      const lay = await amostra.getLayout();
+      log(`Amostra de pedidos (${lay.qHyperCube.qSize.qcy} linhas no total):`);
+      (lay.qHyperCube.qDataPages[0] || { qMatrix: [] }).qMatrix.forEach(r =>
+        log("   " + r.map(c => `${c.qText} [num ${c.qNum}]`).join(" | ")));
+      for(const expr of [
+        "Sum({<DATA_EMISSAO={\">=46266<46301\"}>} VL_TOTAL)",
+        "Sum({<DATA_EMISSAO={\">=$(=Date(46266))<$(=Date(46301))\"}>} VL_TOTAL)",
+        "Sum({<DATA_EMISSAO={\"=Floor(DATA_EMISSAO)>=46266 and Floor(DATA_EMISSAO)<46301\"}>} VL_TOTAL)",
+        "Sum(If(Floor(DATA_EMISSAO)>=46266 and Floor(DATA_EMISSAO)<46301, VL_TOTAL))"
+      ]){
+        const o = await app.createSessionObject({ qInfo: { qType: "pipeline-teste" }, qHyperCubeDef: {
+          qDimensions: [], qMeasures: [{ qDef: { qDef: expr } }], qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: 1, qHeight: 1 }] } });
+        const l = await o.getLayout();
+        const c = l.qHyperCube.qDataPages[0].qMatrix[0][0];
+        log(`   teste setembro/2026: ${expr} => ${c.qText}`);
+      }
+    }catch(e){ log("Amostra de pedidos falhou: " + e.message); }
     const fields = (await listObj({ qInfo: { qType: "FieldList" }, qFieldListDef: { qShowSystem: false } })).qFieldList.qItems;
     const rel = fields.filter(f => /pedido|cliente|bp|emiss|cancel|valor|situa|data|nf|ov|fatur/i.test(f.qName));
     log(`Campos (${fields.length} no total; ${rel.length} relacionados): ${rel.map(f => f.qName).join(" | ")}`);
