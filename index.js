@@ -250,6 +250,12 @@ async function main(){
       log(`   Data de Inativação por mês: ${Object.entries(porMes).sort().map(([k, v]) => `${k}=${v}`).join(", ")}`);
       log(`   Estágios: ${Object.entries(porEstagio).map(([k, v]) => `${k}=${v}`).join(", ")}`);
       log(`   Exemplos: ${leads.slice(0, 3).map(l => `${l.cod} dtInat=${l.dtInat} monthKey=${l.monthKey}`).join(" | ")}`);
+      const cruz = {};
+      leads.forEach(l => { const k = `${l.stage}/${l.status} · ERP "${l.statusErp || "—"}"`; cruz[k] = (cruz[k] || 0) + 1; });
+      log(`   Estágio/status x Status ERP: ${Object.entries(cruz).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(" | ")}`);
+      const ganhos = leads.filter(l => l.stage === "ganho").slice(0, 3);
+      ganhos.forEach(l => log(`   Ganho ${l.cod} (dtInat ${l.dtInat}, dtUltFat ${l.dtUltFat}, seg ${l.seg}): ` +
+        (l.hist || []).slice(0, 4).map(h => `[${h.d}] ${h.t}`).join(" || ")));
     }
     return;
   }
