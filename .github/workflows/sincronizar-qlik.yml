@@ -1,0 +1,38 @@
+# Sincroniza o Qlik com a Pipeline de Retenção (Firestore).
+# As chaves ficam em Settings > Secrets and variables > Actions (nunca no código).
+name: Sincronizar Qlik
+
+on:
+  schedule:
+    # Todo dia 1º do mês às 7h (horário de Brasília = 10h UTC).
+    # Para rodar todo dia útil às 7h, troque por: "0 10 * * 1-5"
+    - cron: "0 10 1 * *"
+  workflow_dispatch: {}   # botão "Run workflow" na aba Actions
+
+concurrency:
+  group: sincronizar-qlik
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Sincronizar
+        run: node index.js --once
+        env:
+          QLIK_HOST: ${{ secrets.QLIK_HOST }}
+          QLIK_APP_ID: ${{ secrets.QLIK_APP_ID }}
+          QLIK_OBJECT_ID: ${{ secrets.QLIK_OBJECT_ID }}
+          QLIK_AUTH: jwt
+          QLIK_VIRTUAL_PROXY: ${{ secrets.QLIK_VIRTUAL_PROXY }}
+          QLIK_JWT: ${{ secrets.QLIK_JWT }}
+          QLIK_REJECT_UNAUTHORIZED: ${{ vars.QLIK_REJECT_UNAUTHORIZED || 'true' }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          SYNC_FROM_MONTH: ${{ vars.SYNC_FROM_MONTH || '2026-09' }}
