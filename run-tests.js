@@ -2,9 +2,10 @@
 // Testes sem Qlik e sem Firestore reais (dados simulados). Rode: npm test
 process.env.TZ = "America/Sao_Paulo";
 const assert = require("assert");
-const { mapRows } = require("../src/mapping");
-const { mergeMonth, commitMonth, groupByMonth, CHUNK_SIZE } = require("../src/firestoreSync");
-const { readAllPages } = require("../src/qlik");
+const { mapRows } = require("./mapping");
+const { mergeMonth, commitMonth, groupByMonth, cleanMonth, cleanupMonth, CHUNK_SIZE } = require("./firestoreSync");
+const { readAllPages, orderedHeaders } = require("./qlik");
+const L = require("./logic");
 
 let passed = 0;
 async function t(name, fn){ await fn(); passed++; console.log("  ✓", name); }
@@ -59,7 +60,7 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     const lead = r.chunks[0].leads[0];
     assert.strictEqual(lead.vendedor, "KELLY VIEIRA DOS SANTOS");
     assert.strictEqual(lead.time, "Líder de Vendas Sandriane");
-    assert.strictEqual(lead.stage, "inativam");
+    assert.strictEqual(lead.stage, "inativo"); // 10/09/2026 já passou
     assert.strictEqual(r.meta.totalLeads, 1);
     assert.strictEqual(r.novos, 1);
   });
@@ -82,6 +83,30 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     const again = mergeMonth("2026-09", first.meta, first.chunks, [{ ...byMonth["2026-09"][0], statusErp: "Inativo" }], "Qlik");
     assert.strictEqual(again.chunks[0].leads[0].stage, "inativo");
   });
+  const ymd = (offsetDias) => { const d = new Date(); d.setDate(d.getDate() + offsetDias);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  await t("Data de Inativação já atingida = Inativado; futura = Inativam no mês", () => {
+    const base = { ...byMonth["2026-09"][0], statusErp: "Ativo" };
+    assert.strictEqual(L.applyImportToLead(null, { ...base, dtInat: ymd(-1) }, "x").stage, "inativo");
+    assert.strictEqual(L.applyImportToLead(null, { ...base, dtInat: ymd(0) }, "x").stage, "inativo");
+    const futuro = L.applyImportToLead(null, { ...base, dtInat: ymd(1) }, "x");
+    assert.strictEqual(futuro.stage, "inativam");
+    assert.strictEqual(futuro.status, "inativam");
+    // a data chega: na próxima sincronização o cliente passa para Inativado
+    const depois = L.applyImportToLead(futuro, { ...base, dtInat: ymd(-2) }, "x");
+    assert.strictEqual(depois.stage, "inativo");
+    assert.strictEqual(depois.status, "inativo");
+    // e se a data for adiada no ERP, volta para Inativam no mês
+    assert.strictEqual(L.applyImportToLead(depois, { ...base, dtInat: ymd(20) }, "x").stage, "inativam");
+  });
+  await t("regra da data não mexe em cliente que o vendedor já trabalhou", () => {
+    const base = { ...byMonth["2026-09"][0], statusErp: "Ativo", dtInat: ymd(-3) };
+    const lead = L.applyImportToLead(null, { ...base, dtInat: ymd(5) }, "x");
+    Object.assign(lead, { stage: "negociando", status: "negociando" });
+    const r = L.applyImportToLead(lead, base, "x");
+    assert.strictEqual(r.stage, "negociando");
+    assert.strictEqual(r.status, "negociando");
+  });
   await t(`quebra em blocos de ${CHUNK_SIZE} clientes, como a página`, () => {
     const many = Array.from({ length: 300 }, (_, i) => ({ ...byMonth["2026-09"][0], cod: "C" + i }));
     const r = mergeMonth("2026-09", null, [], many, "Qlik");
@@ -89,7 +114,7 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     assert.deepStrictEqual(r.chunks.map(c => c.leads.length), [140, 140, 20]);
     assert.strictEqual(r.meta.codToChunk.C299, 2);
     // segunda rodada: só atualiza, sem duplicar
-    const r2 = mergeMonth("2026-09", r.meta, r.chunks, many.slice(0, 10), "Qlik");
+    const r2 = mergeMonth("2026-09", r.meta, r.chunks, many.slice(0, 10).map(x => ({ ...x, uf: "PR" })), "Qlik");
     assert.strictEqual(r2.meta.totalLeads, 300);
     assert.deepStrictEqual([...r2.touched], [0]);
   });
@@ -102,8 +127,10 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     assert.strictEqual(db.store["months/2026-09"].chunkCount, 1);
     assert.strictEqual(db.store["months/2026-09"].sourceFilename, "Qlik app/obj");
     assert.strictEqual(db.store["months/2026-09/chunks/c0"].leads[0].cod, "1001");
-    const out2 = await commitMonth(db, "2026-09", byMonth["2026-09"], "Qlik app/obj");
+    const out2 = await commitMonth(db, "2026-09", byMonth["2026-09"].map(x => ({ ...x, uf: "PR" })), "Qlik app/obj");
     assert.strictEqual(out2.atualizados, 1);
+    const out3 = await commitMonth(db, "2026-09", byMonth["2026-09"].map(x => ({ ...x, uf: "PR" })), "Qlik app/obj");
+    assert.strictEqual(out3.atualizados, 0); // sem mudança, não regrava
     assert.strictEqual(db.store["months/2026-09/chunks/c0"].leads.length, 1);
   });
 
@@ -121,6 +148,77 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     assert.strictEqual(rows[0][0].num, null);
   });
 
+  await t("cabeçalhos seguem o qColumnOrder da tabela do Qlik", () => {
+    const hc = {
+      qDimensionInfo: [{ qFallbackTitle: "Cód Cliente" }, { qFallbackTitle: "Data Cadastro" }, { qFallbackTitle: "Data Inativação" }],
+      qMeasureInfo: [{ qFallbackTitle: "Valor Vencido" }],
+      qColumnOrder: [0, 2, 3, 1]
+    };
+    assert.deepStrictEqual(orderedHeaders(hc), ["Cód Cliente", "Data Inativação", "Valor Vencido", "Data Cadastro"]);
+    assert.deepStrictEqual(orderedHeaders({ ...hc, qColumnOrder: [] }), ["Cód Cliente", "Data Cadastro", "Data Inativação", "Valor Vencido"]);
+    assert.deepStrictEqual(orderedHeaders({ ...hc, qColumnOrder: [0, 0, 1, 2] }), ["Cód Cliente", "Data Cadastro", "Data Inativação", "Valor Vencido"]);
+  });
+
+  console.log("Limpeza de clientes gravados com colunas trocadas");
+  {
+    const freshRec = (cod, dtInat, extra = {}) => ({ ...byMonth["2026-09"][0], cod, dtInat, cli: "CLIENTE " + cod, uf: "RS", dtCad: "2020-01-01", ...extra });
+    const fresh = [freshRec("1001", "2026-10-10"), freshRec("1002", "2026-10-12"), freshRec("1003", "2026-11-03"), freshRec("1004", "2026-10-20")];
+    const freshByCod = Object.fromEntries(fresh.map(r => [r.cod, r]));
+    // Gravação errada: códigos certos com campos trocados, cliente no mês
+    // errado, "código" que era outra coluna e um cliente já trabalhado.
+    const gravados = [
+      freshRec("1001", "2026-10-10"),                                       // ok
+      freshRec("1002", "2026-10-12", { cli: "RS", uf: "CLIENTE 1002" }),    // trocado, intocado
+      freshRec("1003", "2026-10-15"),                                       // mês errado, intocado
+      freshRec("CLINICA X", "2026-10-01", { uf: "2020-01-01" }),            // código era outra coluna
+      freshRec("1004", "2026-10-20", { dtCad: "2026-10-20" }),              // trocado, mas trabalhado
+      freshRec("9999", "2026-10-05")                                        // saiu do Qlik, formato ok
+    ];
+    const first = mergeMonth("2026-10", null, [], gravados, "Qlik");
+    const l1004 = first.chunks[0].leads.find(l => l.cod === "1004");
+    Object.assign(l1004, { stage: "negociando", status: "negociando", notes: "ligar" });
+
+    await t("remove só os trocados que ninguém trabalhou", () => {
+      const r = cleanMonth("2026-10", first.meta, JSON.parse(JSON.stringify(first.chunks)), freshByCod);
+      assert.deepStrictEqual(r.removidos.map(x => x.cod).sort(), ["1002", "1003", "CLINICA X"]);
+      assert.deepStrictEqual(r.revisar.map(x => x.cod), ["1004"]);
+      assert.deepStrictEqual(r.chunks[0].leads.map(l => l.cod).sort(), ["1001", "1004", "9999"]);
+      assert.strictEqual(r.meta.totalLeads, 3);
+      assert.strictEqual(r.meta.codToChunk["1002"], undefined);
+    });
+    await t("limpeza + sincronização deixam cada cliente certo no mês certo", async () => {
+      const db = fakeFirestore();
+      db.store["months/2026-10"] = first.meta;
+      db.store["months/2026-10/chunks/c0"] = first.chunks[0];
+      const sim = await cleanupMonth(db, "2026-10", freshByCod, { dryRun: true });
+      assert.strictEqual(sim.removidos.length, 3);
+      assert.strictEqual(db.store["months/2026-10/chunks/c0"].leads.length, 6); // simulação não grava
+      await cleanupMonth(db, "2026-10", freshByCod);
+      const byM = groupByMonth(fresh, "2026-09");
+      for(const mk of Object.keys(byM)) await commitMonth(db, mk, byM[mk], "Qlik");
+      const out = db.store["months/2026-10/chunks/c0"].leads;
+      assert.deepStrictEqual(out.map(l => l.cod).sort(), ["1001", "1002", "1004", "9999"]);
+      const l1002 = out.find(l => l.cod === "1002");
+      assert.strictEqual(l1002.cli, "CLIENTE 1002");
+      assert.strictEqual(l1002.uf, "RS");
+      assert.strictEqual(out.find(l => l.cod === "1004").notes, "ligar");
+      assert.deepStrictEqual(db.store["months/2026-11/chunks/c0"].leads.map(l => l.cod), ["1003"]);
+      // rodar de novo não remove mais nada
+      const again = await cleanupMonth(db, "2026-10", freshByCod);
+      assert.deepStrictEqual(again.removidos, []);
+    });
+    await t("mês que só tinha clientes trocados é apagado", async () => {
+      const db = fakeFirestore();
+      const m = mergeMonth("2027-03", null, [], [freshRec("1001", "2027-03-01")], "Qlik");
+      db.store["months/2027-03"] = m.meta;
+      db.store["months/2027-03/chunks/c0"] = m.chunks[0];
+      const r = await cleanupMonth(db, "2027-03", freshByCod);
+      assert.strictEqual(r.mesApagado, true);
+      assert.ok(!("months/2027-03" in db.store));
+      assert.ok(!("months/2027-03/chunks/c0" in db.store));
+    });
+  }
+
   console.log(`\n${passed} testes passaram.`);
 })().catch(e => { console.error("\n✗ FALHOU:", e.message); console.error(e.stack); process.exit(1); });
 
@@ -136,10 +234,11 @@ function fakeFirestore(){
       const tx = {
         get: async (r) => snap(r.path),
         getAll: async (...rs) => rs.map(r => snap(r.path)),
-        set: (r, data) => writes.push([r.path, data])
+        set: (r, data) => writes.push([r.path, data]),
+        delete: (r) => writes.push([r.path, undefined])
       };
       const result = await fn(tx);
-      writes.forEach(([p, d]) => { store[p] = JSON.parse(JSON.stringify(d)); });
+      writes.forEach(([p, d]) => { if(d === undefined) delete store[p]; else store[p] = JSON.parse(JSON.stringify(d)); });
       return result;
     }
   };

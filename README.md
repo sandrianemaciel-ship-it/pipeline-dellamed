@@ -38,6 +38,29 @@ Instale numa máquina que **enxergue o servidor do Qlik** (rede interna ou VPN) 
 7. **Deixe rodando:** `npm start`. Para iniciar junto com o Windows, instale como serviço, por exemplo com [NSSM](https://nssm.cc/): `nssm install PipelineQlikSync "C:\Program Files\nodejs\node.exe" "C:\caminho\qlik-sync\src\index.js"`. Se preferir, `pm2` também funciona.
 8. Publique o HTML atualizado (`web/Pipeline de Retencao Dellamed.html`) no lugar do atual.
 
+## Regra da Data de Inativação
+
+Enquanto o cliente está em **Inativam no mês** ou **Inativado** (ninguém mexeu nele ainda), quem decide o estágio é a Data Inativação:
+
+- **Data já atingida** (hoje ou antes): **Inativado**.
+- **Data futura**: **Inativam no mês**.
+
+A sincronização de hora em hora aplica a regra, então o cliente passa sozinho para Inativado quando a data chega. Clientes que o vendedor já trabalhou (Contato, Proposta, Negociando, Ganho, Negociação Perdida) não são mexidos.
+
+## Ordem das colunas do Qlik
+
+A leitura segue a ordem em que as colunas aparecem na tabela do Qlik (`qColumnOrder`). Antes, se a tabela tivesse sido reordenada na planilha, os valores caíam na coluna errada.
+
+### Limpeza dos clientes gravados com colunas trocadas
+
+Rode uma vez: aba **Actions** → **Sincronizar Qlik** → **Run workflow**, marcando **Limpar clientes gravados com colunas trocadas**. Se quiser ver antes o que vai acontecer, marque também **Só simular**. Na máquina local, o equivalente é `node index.js --once --limpar` (ou `--dry-run --limpar` para simular).
+
+A limpeza compara o que está no Firestore com a leitura correta do Qlik:
+
+- **Remove** o cliente quando ele está no mês errado, quando Razão Social/CNPJ/UF/Data Cadastro/Data 1º Faturamento não batem com o Qlik, ou quando o "código" tem formato de outra coluna. Só remove se **ninguém trabalhou** o cliente. A sincronização que roda logo depois recria os clientes certos, no mês certo.
+- **Mantém** os clientes suspeitos que o vendedor já trabalhou e lista cada um no log para revisão manual. Os dados vindos do Qlik são corrigidos na sincronização, e o que o vendedor preencheu continua lá.
+- Um mês que só tinha clientes trocados é apagado.
+
 ## Nomes de coluna reconhecidos automaticamente
 
 São os mesmos do export do ERP: Cód Cliente, Razão Social/Cliente, CNPJ, UF, Cidade, Segmento, Telefone, Email, Tem Carteira, Total Pedidos Pendentes, Inadimplente, Valor Vencido, Data Cadastro, Data 1º Faturamento, Data Último Faturamento, **Data Inativação**, Status Atual, Data Último Pedido Aberto, Valor de Pedido, Representante (Z1), Vendedor Interno (VE), Key Account (Z3), Prospect (Z5), Sucesso do Cliente (Z6).

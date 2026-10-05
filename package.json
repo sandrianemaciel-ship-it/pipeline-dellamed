@@ -2,13 +2,13 @@
   "name": "dellamed-qlik-sync",
   "version": "1.0.0",
   "description": "Sincroniza dados do Qlik Sense Enterprise com a Pipeline de Retenção (Firestore)",
-  "main": "src/index.js",
+  "main": "index.js",
   "private": true,
   "scripts": {
-    "start": "node src/index.js",
-    "once": "node src/index.js --once",
-    "dry-run": "node src/index.js --dry-run",
-    "test": "node test/run-tests.js",
+    "start": "node index.js",
+    "once": "node index.js --once",
+    "dry-run": "node index.js --dry-run",
+    "test": "node run-tests.js",
     "extract": "python3 tools/extract-logic.py"
   },
   "engines": { "node": ">=18" },

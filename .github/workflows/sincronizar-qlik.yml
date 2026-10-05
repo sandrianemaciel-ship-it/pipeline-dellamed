@@ -7,7 +7,16 @@ on:
     # Todo dia 1º do mês às 7h (horário de Brasília = 10h UTC).
     # Para rodar todo dia útil às 7h, troque por: "0 10 * * 1-5"
         - cron: "7 * * * *"
-  workflow_dispatch: {}   # botão "Run workflow" na aba Actions
+  workflow_dispatch:      # botão "Run workflow" na aba Actions
+    inputs:
+      limpar:
+        description: "Limpar clientes gravados com colunas trocadas (antes de sincronizar)"
+        type: boolean
+        default: false
+      simular:
+        description: "Só simular: mostra no log o que faria, sem gravar nada"
+        type: boolean
+        default: false
 
 concurrency:
   group: sincronizar-qlik
@@ -25,7 +34,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Sincronizar
-        run: node index.js --once
+        run: node index.js --once ${{ inputs.limpar && '--limpar' || '' }} ${{ inputs.simular && '--dry-run' || '' }}
         env:
           QLIK_HOST: ${{ secrets.QLIK_HOST }}
           QLIK_APP_ID: ${{ secrets.QLIK_APP_ID }}

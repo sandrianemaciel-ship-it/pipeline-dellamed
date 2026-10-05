@@ -1476,9 +1476,10 @@ function applyImportToLead(existing, fresh, monthKey){
   if(!existing){
     const derivedVendedor = deriveVendedor(fresh);
     const derivedTime = lookupTeam(derivedVendedor);
+    const stageInicial = stageByDtInat(fresh.dtInat);
     return Object.assign({}, fresh, {
-      stage: "inativam",
-      status: "inativam",
+      stage: stageInicial,
+      status: stageInicial,
       acao: null, time: derivedTime, vendedor: derivedVendedor, vendedorAuto: true, ofensor: null, ofensorDetalhe: null, notes: "",
       dtUltimoContato: null, dtProximoContato: null, horaProximoContato: null, valorProposta: null, linhasPositivadas: [],
       contatoDecisor: null, whatsapp: null, whatsappIndisponivel: false,
@@ -1535,10 +1536,21 @@ function migrateLeadStatusKey(lead){
 //     dentro do mês atual.
 // "Inativo" continua forçando Perdido/Inativado (regra já existente antes
 // desta mudança). Qualquer OUTRO valor de Status Atual (incluindo vazio,
-// "Ativo" etc.) NÃO movimenta o lead — ele permanece exatamente no estágio/
-// status em que já estava.
+// "Ativo" etc.) NÃO movimenta o lead para Ganho; se ele ainda está em
+// "Inativam no mês"/"Inativado", vale a regra da Data de Inativação
+// (stageByDtInat abaixo).
 const STATUS_ERP_RECUPERADO_FATURAMENTO = "recuperado com faturamento";
 const STATUS_ERP_RECUPERADO_PEDIDO = "recuperado com pedido";
+// Regra da Data de Inativação: enquanto o lead está num estágio automático
+// ("Inativam no mês" ou "Inativado"), quem define o estágio é a data:
+// data já atingida (hoje ou antes) = Inativado; data futura = Inativam no mês.
+// Estágios trabalhados pelo vendedor (Contato, Proposta, Negociando, Ganho,
+// Negociação Perdida) nunca são mexidos por esta regra.
+function stageByDtInat(dtInat){
+  const d = parseISODate(dtInat);
+  if(!d) return "inativam";
+  return d.getTime() <= todayLocal().getTime() ? "inativo" : "inativam";
+}
 function computeStatusStage(lead){
   let status = lead.status || "inativam";
   let stage = lead.stage || "inativam";
@@ -1578,8 +1590,12 @@ function computeStatusStage(lead){
       note = `Status ERP "Recuperado com pedido" recebido, mas a Data de Inativação (${fmtDate(lead.dtInat)}) não está no mês atual — não movido automaticamente, revisar manualmente.`;
     }
   }
-  // Qualquer outro Status Atual (ERP) não movimenta o lead: status/stage
-  // permanecem os mesmos já definidos no início da função.
+  // Qualquer outro Status Atual (ERP) não movimenta o lead para Ganho. Se ele
+  // continua num estágio automático, vale a regra da Data de Inativação.
+  const AUTO = ["inativam", "inativo"];
+  if(AUTO.includes(stage) && AUTO.includes(status)){
+    status = stage = stageByDtInat(lead.dtInat);
+  }
   return {status, stage, note};
 }
 

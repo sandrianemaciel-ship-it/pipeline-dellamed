@@ -41,6 +41,21 @@ function cellValue(cell){
   return { text: cell.qText != null ? cell.qText : null, num: hasNum ? cell.qNum : null };
 }
 
+// O Engine devolve as colunas do qMatrix na ordem de qColumnOrder (a ordem
+// em que a tabela aparece na planilha), não "dimensões e depois medidas".
+// Se a tabela foi reordenada no Qlik e os cabeçalhos não acompanharem, os
+// valores caem na coluna errada (ex.: Data Cadastro gravada como Data
+// Inativação).
+function orderedHeaders(hc){
+  const base = (hc.qDimensionInfo || []).map(d => d.qFallbackTitle)
+    .concat((hc.qMeasureInfo || []).map(m => m.qFallbackTitle));
+  const order = hc.qColumnOrder;
+  const valid = Array.isArray(order) && order.length === base.length
+    && order.every(i => Number.isInteger(i) && i >= 0 && i < base.length)
+    && new Set(order).size === base.length;
+  return valid ? order.map(i => base[i]) : base;
+}
+
 async function readAllPages(obj, layout){
   const hc = layout.qHyperCube;
   const width = hc.qSize.qcx;
@@ -81,8 +96,7 @@ async function fetchTable(cfg, log = console.log){
       const layout = await obj.getLayout();
       const hc = layout.qHyperCube;
       if(!hc) throw new Error(`O objeto ${cfg.objectId} não é uma tabela/gráfico com hipercubo.`);
-      headers = hc.qDimensionInfo.map(d => d.qFallbackTitle)
-        .concat(hc.qMeasureInfo.map(m => m.qFallbackTitle));
+      headers = orderedHeaders(hc);
       log(`Qlik: objeto ${cfg.objectId} com ${hc.qSize.qcy} linhas x ${hc.qSize.qcx} colunas.`);
       const rows = await readAllPages(obj, layout);
       return { headers, rows };
@@ -135,4 +149,4 @@ function explainSocketError(err, d, url){
   return parts.join(" ");
 }
 
-module.exports = { fetchTable, buildSocketUrl, cellValue, readAllPages };
+module.exports = { fetchTable, buildSocketUrl, cellValue, readAllPages, orderedHeaders };

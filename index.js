@@ -3,6 +3,8 @@
 //   node index.js --once       roda uma vez e sai
 //   node index.js --dry-run    lê o Qlik e mostra o que faria, sem gravar
 //   node index.js              fica rodando: agenda (CRON) + atende o botão da página
+//   --limpar                   antes de gravar, remove os clientes gravados com
+//                              colunas trocadas (junto com --dry-run, só mostra)
 process.env.TZ = process.env.TZ || "America/Sao_Paulo"; // "mês atual" das regras = horário de Brasília
 require("dotenv").config();
 const fs = require("fs");
@@ -11,11 +13,12 @@ const cron = require("node-cron");
 const admin = require("firebase-admin");
 const { fetchTable } = require("./qlik");
 const { mapRows } = require("./mapping");
-const { groupByMonth, commitMonth } = require("./firestoreSync");
+const { groupByMonth, commitMonth, cleanupMonth } = require("./firestoreSync");
 
 const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
 const ONCE = args.has("--once") || DRY;
+const LIMPAR = args.has("--limpar") || process.env.LIMPAR_COLUNAS_TROCADAS === "true";
 
 function log(...a){ console.log(new Date().toLocaleString("pt-BR"), "-", ...a); }
 
@@ -64,7 +67,7 @@ function initFirestore(cfg){
 }
 
 async function setStatus(data){
-  if(!db) return;
+  if(!db || DRY) return; // simulação não grava nada
   await db.doc("sync/status").set({ ...data, updatedAt: new Date().toISOString() }, { merge: true });
 }
 
@@ -84,6 +87,7 @@ async function runSync(cfg, origem){
     const semVend = records.filter(r => !(r.vendInt || r.keyAcc || r.prospect || r.rep || r.sucCli)).length;
     if(semVend / records.length > 0.7) log(`ATENÇÃO: ${semVend}/${records.length} sem Representante/Vendedor — confira o mapeamento de colunas.`);
 
+    if(LIMPAR) await limparColunasTrocadas(cfg, records);
     const byMonth = groupByMonth(records, cfg.fromMonth);
     const meses = Object.keys(byMonth).sort();
     if(DRY){
@@ -116,9 +120,34 @@ async function runSync(cfg, origem){
   }
 }
 
+// Remove do Firestore os clientes que foram gravados com as colunas do Qlik
+// trocadas (antes da correção do qColumnOrder). Detalhes em firestoreSync.js.
+async function limparColunasTrocadas(cfg, records){
+  const freshByCod = {};
+  records.forEach(r => { freshByCod[r.cod] = r; });
+  const snap = await db.collection("months").get();
+  const meses = snap.docs.map(d => d.id).filter(id => /^\d{4}-\d{2}$/.test(id) && id >= cfg.fromMonth).sort();
+  const tag = DRY ? "[simulação] " : "";
+  let total = 0;
+  for(const mk of meses){
+    const r = await cleanupMonth(db, mk, freshByCod, { dryRun: DRY });
+    total += r.removidos.length;
+    if(r.removidos.length){
+      log(`${tag}Limpeza ${mk}: ${r.removidos.length} cliente(s) com colunas trocadas removido(s)${r.mesApagado ? " (mês ficou vazio e foi apagado)" : ""}.`);
+      r.removidos.slice(0, 20).forEach(x => log(`   - ${x.cod}: ${x.motivo}`));
+      if(r.removidos.length > 20) log(`   ... e mais ${r.removidos.length - 20}.`);
+    }
+    if(r.revisar.length){
+      log(`${tag}Limpeza ${mk}: ${r.revisar.length} cliente(s) suspeito(s) já trabalhado(s) pelo vendedor — mantidos, revisar à mão:`);
+      r.revisar.forEach(x => log(`   - ${x.cod}: ${x.motivo}`));
+    }
+  }
+  log(`${tag}Limpeza concluída: ${total} cliente(s) removido(s) em ${meses.length} mês(es) verificados.`);
+}
+
 async function main(){
   const cfg = loadConfig();
-  if(!DRY) initFirestore(cfg);
+  if(!DRY || LIMPAR) initFirestore(cfg);
   if(ONCE){ await runSync(cfg, DRY ? "simulação" : "manual"); return; }
 
   // 1) Agenda automática
