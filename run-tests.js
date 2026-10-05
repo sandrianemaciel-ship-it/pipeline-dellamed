@@ -337,6 +337,36 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     });
   }
 
+  console.log("Movimentação só pelo vendedor durante o mês");
+  {
+    const base = { ...byMonth["2026-09"][0] };
+    const hoje = new Date(); const futuro = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + 3);
+    const isoF = `${futuro.getFullYear()}-${String(futuro.getMonth() + 1).padStart(2, "0")}-${String(futuro.getDate()).padStart(2, "0")}`;
+    await t("Status ERP 'Recuperado...' ou 'Inativo' não move para Ganho/Perdido", () => {
+      for(const st of ["Recuperado com faturamento", "Recuperado com pedido", "Inativo"]){
+        const novo = L.applyImportToLead(null, { ...base, cod: "5001", dtInat: isoF, statusErp: "Ativo" }, "x");
+        const r = L.applyImportToLead(novo, { ...base, cod: "5001", dtInat: isoF, statusErp: st }, "x");
+        assert.strictEqual(r.stage, "inativam", st);
+        assert.strictEqual(r.status, "inativam", st);
+      }
+    });
+    await t("Ganho dado pela regra antiga do ERP volta; Ganho do vendedor fica", () => {
+      const m = mergeMonth("2026-10", null, [], [{ ...base, cod: "5101", dtInat: isoF }, { ...base, cod: "5102", dtInat: isoF }], "Qlik");
+      const [erp, vend] = m.chunks[0].leads;
+      Object.assign(erp, { stage: "ganho", status: "ganho" });
+      erp.hist.unshift({ d: "x", t: "Recuperado com faturamento: Data de Inativação (10/10/2026) condizente com o prazo — movido automaticamente para Ganho." });
+      Object.assign(vend, { stage: "ganho", status: "ganho" });
+      vend.hist.unshift({ d: "y", t: "Recuperado com pedido: Data de Inativação (10/10/2026) dentro do mês atual — movido automaticamente para Ganho." });
+      vend.hist.unshift({ d: "z", t: 'Movido de "Inativam no mês" para "Ganho" — fechou pedido' });
+      const r = mergeMonth("2026-10", m.meta, m.chunks, [], "Qlik");
+      assert.strictEqual(r.revertidosErp, 1);
+      assert.strictEqual(erp.stage, "inativam");
+      assert.ok(erp.hist[0].t.startsWith('Voltou de "Ganho"'));
+      assert.strictEqual(vend.stage, "ganho");
+      assert.strictEqual(mergeMonth("2026-10", r.meta, r.chunks, [], "Qlik").revertidosErp, 0);
+    });
+  }
+
   console.log(`\n${passed} testes passaram.`);
 })().catch(e => { console.error("\n✗ FALHOU:", e.message); console.error(e.stack); process.exit(1); });
 

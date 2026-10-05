@@ -19,13 +19,40 @@ function groupByMonth(records, fromMonth){
   return byMonth;
 }
 
+// Clientes que a regra antiga do Status ERP ("Recuperado com faturamento/
+// pedido") colocou em Ganho durante o mês. Pela regra Dellamed só o vendedor
+// move para Ganho durante o mês (o automático é só no fechamento), então eles
+// voltam para "Inativam no mês"/"Inativado" pela data. Quem o vendedor moveu
+// (histórico "Movido de ...") fica como está.
+const NOTA_GANHO_ERP = /^Recuperado com (faturamento|pedido): Data de Inativação/;
+function isGanhoPeloErp(l){
+  const hist = l.hist || [];
+  return l.stage === "ganho" && !l.fechamentoAuto
+    && hist.some(h => NOTA_GANHO_ERP.test(h.t || ""))
+    && !hist.some(h => /^Movido de "/.test(h.t || ""));
+}
+function revertGanhoErp(chunks){
+  const touched = new Set();
+  let revertidos = 0;
+  chunks.forEach((c, ci) => (c.leads || []).forEach(l => {
+    if(!isGanhoPeloErp(l)) return;
+    l.stage = l.status = "inativam";
+    const r = L.computeStatusStage(l);
+    l.stage = r.stage; l.status = r.status;
+    L.pushHist(l, `Voltou de "Ganho" para "${STAGE_LABEL[l.stage]}": o Status ERP não move mais o cliente durante o mês — Ganho só pelo vendedor ou no fechamento do mês.`);
+    touched.add(ci); revertidos++;
+  }));
+  return { touched, revertidos };
+}
+
 // Lógica pura (sem Firestore) — espelha commitMonthImport() do HTML.
 function mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel){
   meta = meta ? JSON.parse(JSON.stringify(meta)) : {
     monthKey, importedAt: L.nowISO(), sourceFilename: "", totalLeads: 0, chunkCount: 0, codToChunk: {}
   };
   meta.codToChunk = meta.codToChunk || {};
-  const touched = new Set();
+  const rev = revertGanhoErp(chunks);
+  const touched = new Set(rev.touched);
   const byCod = {};
   chunks.forEach((c, ci) => (c.leads || []).forEach(l => { byCod[l.cod] = { lead: l, ci }; }));
 
@@ -71,7 +98,7 @@ function mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel){
   meta.totalLeads = Object.keys(meta.codToChunk).length;
   meta.importedAt = L.nowISO();
   meta.sourceFilename = sourceLabel;
-  return { meta, chunks, touched, novos, atualizados, semMudanca };
+  return { meta, chunks, touched, novos, atualizados, semMudanca, revertidosErp: rev.revertidos };
 }
 
 // Compara o cliente antes/depois ignorando campos que mudam a cada execução.
@@ -112,7 +139,7 @@ async function commitMonth(db, monthKey, incomingRows, sourceLabel, baseBI = nul
       tx.set(monthRef.collection("chunks").doc("c" + ci), res.chunks[ci]);
     }
     tx.set(monthRef, res.meta);
-    return { monthKey, novos: res.novos, atualizados: res.atualizados, semMudanca: res.semMudanca, total: incomingRows.length };
+    return { monthKey, novos: res.novos, atualizados: res.atualizados, semMudanca: res.semMudanca, total: incomingRows.length, revertidosErp: res.revertidosErp };
   });
 }
 

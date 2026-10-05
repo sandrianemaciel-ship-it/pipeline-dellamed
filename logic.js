@@ -167,49 +167,11 @@ function stageByDtInat(dtInat){
 function computeStatusStage(lead){
   let status = lead.status || "inativam";
   let stage = lead.stage || "inativam";
-  let note = null;
-  const statusErpNorm = norm(lead.statusErp || "");
-
-  if(lead.statusErp === "Inativo"){
-    return {status:"perdido", stage:"inativo", note:null};
-  }
-
-  if(statusErpNorm === STATUS_ERP_RECUPERADO_FATURAMENTO){
-    const meses = mesesInativarPorSegmento(lead.seg);
-    const dtUltFat = parseISODate(lead.dtUltFat);
-    const dtInat = parseISODate(lead.dtInat);
-    if(meses!=null && dtUltFat && dtInat){
-      const esperado = addMonthsSafe(dtUltFat, meses);
-      const condizente = esperado.getFullYear()===dtInat.getFullYear() && esperado.getMonth()===dtInat.getMonth();
-      if(condizente){
-        status = "ganho"; stage = "ganho";
-        note = `Recuperado com faturamento: Data de Inativação (${fmtDate(lead.dtInat)}) condizente com o prazo do segmento "${lead.seg||"—"}" (${meses} meses a partir do último faturamento em ${fmtDate(lead.dtUltFat)}) — movido automaticamente para Ganho.`;
-      }else{
-        const esperadoIso = esperado.getFullYear()+"-"+String(esperado.getMonth()+1).padStart(2,"0")+"-"+String(esperado.getDate()).padStart(2,"0");
-        note = `Status ERP "Recuperado com faturamento" recebido, mas a Data de Inativação (${fmtDate(lead.dtInat)}) não bate com o prazo do segmento "${lead.seg||"—"}" (${meses} meses a partir de ${fmtDate(lead.dtUltFat)}, esperado ~${fmtDate(esperadoIso)}) — não movido automaticamente, revisar manualmente.`;
-      }
-    }else{
-      const motivo = meses==null ? `segmento "${lead.seg||"—"}" não reconhecido na Nova Regra de Inativação` : "Data Último Faturamento ou Data de Inativação ausente";
-      note = `Status ERP "Recuperado com faturamento" recebido, mas não foi possível conferir a regra (${motivo}) — não movido automaticamente, revisar manualmente.`;
-    }
-  }else if(statusErpNorm === STATUS_ERP_RECUPERADO_PEDIDO){
-    const dtInat = parseISODate(lead.dtInat);
-    const t = todayLocal();
-    const condizente = dtInat && dtInat.getFullYear()===t.getFullYear() && dtInat.getMonth()===t.getMonth();
-    if(condizente){
-      status = "ganho"; stage = "ganho";
-      note = `Recuperado com pedido: Data de Inativação (${fmtDate(lead.dtInat)}) dentro do mês atual — movido automaticamente para Ganho.`;
-    }else{
-      note = `Status ERP "Recuperado com pedido" recebido, mas a Data de Inativação (${fmtDate(lead.dtInat)}) não está no mês atual — não movido automaticamente, revisar manualmente.`;
-    }
-  }
-  // Qualquer outro Status Atual (ERP) não movimenta o lead para Ganho. Se ele
-  // continua num estágio automático, vale a regra da Data de Inativação.
   const AUTO = ["inativam", "inativo"];
   if(AUTO.includes(stage) && AUTO.includes(status)){
     status = stage = stageByDtInat(lead.dtInat);
   }
-  return {status, stage, note};
+  return {status, stage, note:null};
 }
 
 const HEADER_ALIASES = {

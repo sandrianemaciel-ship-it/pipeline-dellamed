@@ -70,6 +70,12 @@ A pipeline trabalha só o **mês vigente**. A sincronização traz do BI os clie
 - O total do BI para o mês fica gravado no próprio mês. Ao escolher o mês no filtro, a página mostra "Base do BI no mês" ao lado do número de clientes na pipeline.
 - Meses futuros não são gravados. Os que já existiam foram removidos automaticamente, desde que nenhum cliente deles tivesse sido trabalhado.
 
+## Quem move o cliente
+
+- **Durante o mês**, o automático só alterna entre "Inativam no mês" e "Inativado", pela Data de Inativação. O Status Atual do ERP ("Recuperado com faturamento", "Recuperado com pedido", "Inativo") **não** move ninguém. Os atalhos "Recuperado com…" continuam disponíveis para consulta.
+- Pedido identificado no Qlik só gera o **aviso** no card e no cadastro. Quem move para Ganho é o vendedor.
+- **No dia 01 do mês seguinte**, o fechamento move automaticamente os clientes que sobraram (veja abaixo).
+
 ## Pedido identificado e fechamento do mês
 
 A cada sincronização o serviço consulta a pasta **Pedidos** do Qlik: pedidos por BP (`COD_CLIENTE`), com `DATA_EMISSAO` dentro do mês da pipeline e valor `sum(VL_TOTAL)` maior que zero. É a mesma conta de "Valor Total de Pedidos (- Canc)", em que os cancelamentos já entram negativos.

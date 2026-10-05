@@ -98,7 +98,7 @@ async function runSync(cfg, origem){
     // os seguintes entram quando chegar o dia 01 deles.
     const atual = mesAtual();
     const meses = Object.keys(byMonth).filter(mk => mk === atual);
-    const baseBI = { total: (byMonth[atual] || []).length, de: `${atual}-01`, ate: ultimoDia(atual) };
+    const baseBI = { total: new Set((byMonth[atual] || []).map(r => r.cod)).size, de: `${atual}-01`, ate: ultimoDia(atual) };
     log(`Base do BI em ${atual}: ${baseBI.total} clientes com Data de Inativação de ${fmtBR(baseBI.de)} a ${fmtBR(baseBI.ate)}.`);
     await removerMesesFuturos(atual);
     if(DRY){
@@ -121,7 +121,7 @@ async function runSync(cfg, origem){
     const label = `Qlik ${cfg.qlik.appId}${cfg.qlik.objectId ? "/" + cfg.qlik.objectId : ""}`;
     for(const mk of meses){
       const r = await commitMonth(db, mk, byMonth[mk], label, baseBI);
-      log(`${mk}: ${r.novos} novos, ${r.atualizados} atualizados`);
+      log(`${mk}: ${r.novos} novos, ${r.atualizados} atualizados` + (r.revertidosErp ? `, ${r.revertidosErp} voltaram de Ganho (regra antiga do Status ERP)` : ""));
       resumo.push(r);
     }
     const novos = resumo.reduce((s, r) => s + r.novos, 0);
