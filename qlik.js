@@ -44,16 +44,19 @@ function cellValue(cell){
 // O Engine devolve as colunas do qMatrix na ordem de qColumnOrder (a ordem
 // em que a tabela aparece na planilha), não "dimensões e depois medidas".
 // Se a tabela foi reordenada no Qlik e os cabeçalhos não acompanharem, os
-// valores caem na coluna errada (ex.: Data Cadastro gravada como Data
-// Inativação).
+// valores caem na coluna errada (ex.: Data Último Faturamento gravada como
+// Data Inativação). Colunas ocultas na tabela (condição de exibição falsa)
+// continuam em qColumnOrder, mas não vêm nos dados: o Engine as marca com
+// qError e elas são puladas aqui.
 function orderedHeaders(hc){
-  const base = (hc.qDimensionInfo || []).map(d => d.qFallbackTitle)
-    .concat((hc.qMeasureInfo || []).map(m => m.qFallbackTitle));
+  const cols = (hc.qDimensionInfo || []).concat(hc.qMeasureInfo || [])
+    .map(c => ({ title: c.qFallbackTitle, hidden: !!c.qError }));
   const order = hc.qColumnOrder;
-  const valid = Array.isArray(order) && order.length === base.length
-    && order.every(i => Number.isInteger(i) && i >= 0 && i < base.length)
-    && new Set(order).size === base.length;
-  return valid ? order.map(i => base[i]) : base;
+  const valid = Array.isArray(order) && order.length === cols.length
+    && order.every(i => Number.isInteger(i) && i >= 0 && i < cols.length)
+    && new Set(order).size === cols.length;
+  const idx = valid ? order : cols.map((_, i) => i);
+  return idx.filter(i => !cols[i].hidden).map(i => cols[i].title);
 }
 
 async function readAllPages(obj, layout){
@@ -98,7 +101,17 @@ async function fetchTable(cfg, log = console.log){
       if(!hc) throw new Error(`O objeto ${cfg.objectId} não é uma tabela/gráfico com hipercubo.`);
       headers = orderedHeaders(hc);
       log(`Qlik: objeto ${cfg.objectId} com ${hc.qSize.qcy} linhas x ${hc.qSize.qcx} colunas.`);
-      log(`Qlik: qColumnOrder = ${JSON.stringify(hc.qColumnOrder || [])}; colunas na ordem lida: ${headers.join(" | ")}`);
+      log(`Qlik: colunas na ordem lida: ${headers.join(" | ")}`);
+      // Trava de segurança: se o número de cabeçalhos não bate com o de
+      // colunas dos dados, os valores cairiam na coluna errada. Melhor parar
+      // do que gravar clientes trocados.
+      if(headers.length !== hc.qSize.qcx){
+        const info = (hc.qDimensionInfo || []).concat(hc.qMeasureInfo || [])
+          .map(c => c.qFallbackTitle + (c.qError ? ` (erro ${c.qError.qErrorCode})` : ""));
+        throw new Error(`A tabela do Qlik tem ${hc.qSize.qcx} colunas de dados, mas ${headers.length} cabeçalhos ` +
+          `(qColumnOrder ${JSON.stringify(hc.qColumnOrder || [])}; colunas: ${info.join(" | ")}). ` +
+          "Nada foi gravado. Confira colunas ocultas ou condicionais na tabela do Qlik.");
+      }
       const rows = await readAllPages(obj, layout);
       return { headers, rows };
     }

@@ -157,6 +157,9 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     assert.deepStrictEqual(orderedHeaders(hc), ["Cód Cliente", "Data Inativação", "Valor Vencido", "Data Cadastro"]);
     assert.deepStrictEqual(orderedHeaders({ ...hc, qColumnOrder: [] }), ["Cód Cliente", "Data Cadastro", "Data Inativação", "Valor Vencido"]);
     assert.deepStrictEqual(orderedHeaders({ ...hc, qColumnOrder: [0, 0, 1, 2] }), ["Cód Cliente", "Data Cadastro", "Data Inativação", "Valor Vencido"]);
+    // coluna oculta (condição de exibição falsa) não vem nos dados
+    const oculta = { ...hc, qDimensionInfo: hc.qDimensionInfo.map((d, i) => i === 1 ? { ...d, qError: { qErrorCode: 7005 } } : d) };
+    assert.deepStrictEqual(orderedHeaders(oculta), ["Cód Cliente", "Data Inativação", "Valor Vencido"]);
   });
 
   console.log("Limpeza de clientes gravados com colunas trocadas");
