@@ -1,8 +1,8 @@
 "use strict";
-// Serviço de sincronização Qlik Sense -> Firestore da Pipeline de Retenção.
-//   node src/index.js --once       roda uma vez e sai (bom para o Agendador de Tarefas)
-//   node src/index.js --dry-run    lê o Qlik e mostra o que faria, sem gravar
-//   node src/index.js              fica rodando: agenda (CRON) + atende o botão da página
+// Serviço de sincronização Qlik -> Firestore da Pipeline de Retenção.
+//   node index.js --once       roda uma vez e sai
+//   node index.js --dry-run    lê o Qlik e mostra o que faria, sem gravar
+//   node index.js              fica rodando: agenda (CRON) + atende o botão da página
 process.env.TZ = process.env.TZ || "America/Sao_Paulo"; // "mês atual" das regras = horário de Brasília
 require("dotenv").config();
 const fs = require("fs");
@@ -20,7 +20,10 @@ const ONCE = args.has("--once") || DRY;
 function log(...a){ console.log(new Date().toLocaleString("pt-BR"), "-", ...a); }
 
 function loadConfig(){
-  const e = process.env;
+  // Limpa espaços/quebras de linha que às vezes vêm junto ao colar os segredos.
+  const e = {};
+  Object.entries(process.env).forEach(([k, v]) => { e[k] = typeof v === "string" ? v.trim() : v; });
+  if(e.QLIK_HOST) e.QLIK_HOST = e.QLIK_HOST.replace(/^https?:\/\//, "").replace(/\/+$/, "");
   const need = (k) => { if(!e[k]) throw new Error(`Faltou ${k} no arquivo .env`); return e[k]; };
   const authMode = (e.QLIK_AUTH || "jwt").toLowerCase();
   const qlik = {
