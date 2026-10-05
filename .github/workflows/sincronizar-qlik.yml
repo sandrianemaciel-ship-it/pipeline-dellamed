@@ -6,7 +6,7 @@ on:
   schedule:
     # Todo dia 1º do mês às 7h (horário de Brasília = 10h UTC).
     # Para rodar todo dia útil às 7h, troque por: "0 10 * * 1-5"
-    - cron: "0 10 1 * *"
+        - cron: "7 * * * *"
   workflow_dispatch: {}   # botão "Run workflow" na aba Actions
 
 concurrency:
