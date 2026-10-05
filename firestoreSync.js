@@ -37,11 +37,22 @@ function mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel){
       meta.chunkCount = lastIdx + 1;
     }
   };
-  let novos = 0, atualizados = 0;
+  let novos = 0, atualizados = 0, semMudanca = 0;
   for(const fresh of incomingRows){
     const hit = byCod[fresh.cod];
     const merged = L.applyImportToLead(hit ? hit.lead : null, fresh, monthKey);
     if(hit){
+      // Rodando de hora em hora, não podemos regravar o cliente nem encher o
+      // histórico (só guarda 5 entradas) com "Atualizado via importação" se
+      // nada mudou — isso apagaria as observações reais dos vendedores.
+      const old = hit.lead;
+      if(sameData(old, merged)){ semMudanca++; continue; }
+      merged.hist = (old.hist || []).slice();
+      if(old.status !== merged.status || old.stage !== merged.stage){
+        L.pushHist(merged, "Atualizado via importação (status: " + L.STATUS_LABEL[merged.status] + ")");
+      }
+      const nota = L.computeStatusStage(Object.assign({}, merged, { status: old.status, stage: old.stage })).note;
+      if(nota && !merged.hist.some(h => h.t === nota)) L.pushHist(merged, nota);
       const chunk = chunks[hit.ci];
       const idx = chunk.leads.findIndex(x => x.cod === fresh.cod);
       if(idx >= 0) chunk.leads[idx] = merged; else chunk.leads.push(merged);
@@ -60,7 +71,18 @@ function mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel){
   meta.totalLeads = Object.keys(meta.codToChunk).length;
   meta.importedAt = L.nowISO();
   meta.sourceFilename = sourceLabel;
-  return { meta, chunks, touched, novos, atualizados };
+  return { meta, chunks, touched, novos, atualizados, semMudanca };
+}
+
+// Compara o cliente antes/depois ignorando campos que mudam a cada execução.
+const VOLATEIS = new Set(["dataUpdatedAt", "hist"]);
+function sameData(a, b){
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for(const k of keys){
+    if(VOLATEIS.has(k)) continue;
+    if(JSON.stringify(a[k] ?? null) !== JSON.stringify(b[k] ?? null)) return false;
+  }
+  return true;
 }
 
 async function commitMonth(db, monthKey, incomingRows, sourceLabel){
@@ -76,11 +98,14 @@ async function commitMonth(db, monthKey, incomingRows, sourceLabel){
       snaps.forEach((s, i) => { chunks[i] = s.exists ? { ...s.data(), leads: s.data().leads || [] } : { leads: [] }; });
     }
     const res = mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel);
+    if(!res.touched.size && metaSnap.exists){
+      return { monthKey, novos: 0, atualizados: 0, semMudanca: res.semMudanca, total: incomingRows.length };
+    }
     for(const ci of res.touched){
       tx.set(monthRef.collection("chunks").doc("c" + ci), res.chunks[ci]);
     }
     tx.set(monthRef, res.meta);
-    return { monthKey, novos: res.novos, atualizados: res.atualizados, total: incomingRows.length };
+    return { monthKey, novos: res.novos, atualizados: res.atualizados, semMudanca: res.semMudanca, total: incomingRows.length };
   });
 }
 
