@@ -149,7 +149,10 @@ async function limparColunasTrocadas(cfg, records){
     }
     if(r.revisar.length){
       log(`${tag}Limpeza ${mk}: ${r.revisar.length} cliente(s) suspeito(s) já trabalhado(s) pelo vendedor — mantidos, revisar à mão:`);
-      r.revisar.forEach(x => log(`   - ${x.cod}: ${x.motivo}`));
+      const porMotivo = {};
+      r.revisar.forEach(x => { porMotivo[x.trabalhado] = (porMotivo[x.trabalhado] || 0) + 1; });
+      log("   Por que contam como trabalhados:", Object.entries(porMotivo).map(([k, v]) => `${k}=${v}`).join(", "));
+      r.revisar.forEach(x => log(`   - ${x.cod}: ${x.motivo} [${x.trabalhado}]`));
     }
   }
   log(`${tag}Limpeza concluída: ${total} cliente(s) removido(s) em ${meses.length} mês(es) verificados.`);

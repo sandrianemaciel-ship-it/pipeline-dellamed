@@ -122,15 +122,21 @@ async function commitMonth(db, monthKey, incomingRows, sourceLabel){
 // colunas trocadas (e não de uma atualização normal, como Data Último Faturamento).
 const CAMPOS_FIXOS = ["cli", "cnpj", "uf", "dtCad", "dt1Fat"];
 
-function isUntouched(l){
-  return ["inativam", "inativo"].includes(l.stage)
-    && ["inativam", "inativo"].includes(l.status)
-    && !l.notes && !l.acao && !l.ofensor && !l.ofensorDetalhe
-    && !l.dtUltimoContato && !l.dtProximoContato && !l.valorProposta
-    && !(l.linhasPositivadas && l.linhasPositivadas.length)
-    && !l.contatoDecisor && !l.whatsapp && l.vendedorAuto !== false
-    && (!l.lastTouched || !l.createdAt || l.lastTouched === l.createdAt);
+// Devolve null quando ninguém trabalhou o cliente, ou o primeiro sinal de
+// trabalho do vendedor encontrado.
+function workedReason(l){
+  if(!["inativam", "inativo"].includes(l.stage)) return "estágio " + l.stage;
+  if(!["inativam", "inativo"].includes(l.status)) return "status " + l.status;
+  for(const k of ["notes", "acao", "ofensor", "ofensorDetalhe", "dtUltimoContato", "dtProximoContato",
+    "valorProposta", "contatoDecisor", "whatsapp"]){
+    if(l[k]) return "preencheu " + k;
+  }
+  if(l.linhasPositivadas && l.linhasPositivadas.length) return "preencheu linhasPositivadas";
+  if(l.vendedorAuto === false) return "vendedor escolhido à mão";
+  if(l.lastTouched && l.createdAt && l.lastTouched !== l.createdAt) return "card salvo na página";
+  return null;
 }
+function isUntouched(l){ return !workedReason(l); }
 
 // Formato dos códigos de cliente do Qlik (ex.: só dígitos, de 3 a 6 casas),
 // para reconhecer um "código" que na verdade é outra coluna (nome, CNPJ, valor).
@@ -175,7 +181,7 @@ function cleanMonth(monthKey, meta, chunks, freshByCod){
         if(meta.codToChunk[l.cod] === ci) delete meta.codToChunk[l.cod];
         touched.add(ci);
       }else{
-        revisar.push({ cod: l.cod, motivo });
+        revisar.push({ cod: l.cod, motivo, trabalhado: workedReason(l) });
         keep.push(l);
       }
     }
