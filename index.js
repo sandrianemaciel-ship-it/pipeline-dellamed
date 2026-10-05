@@ -13,7 +13,7 @@ const cron = require("node-cron");
 const admin = require("firebase-admin");
 const { fetchTable, fetchPedidos, discoverApp } = require("./qlik");
 const { mapRows } = require("./mapping");
-const { groupByMonth, commitMonth, cleanupMonth, indexPedidos, commitPedidosMonth, closeMonth } = require("./firestoreSync");
+const { groupByMonth, commitMonth, cleanupMonth, indexPedidos, commitPedidosMonth, closeMonth, removeFutureMonth } = require("./firestoreSync");
 
 const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
@@ -92,7 +92,14 @@ async function runSync(cfg, origem){
 
     if(LIMPAR) await limparColunasTrocadas(cfg, records);
     const byMonth = groupByMonth(records, cfg.fromMonth);
-    const meses = Object.keys(byMonth).sort();
+    // Um mês por vez: só o mês vigente recebe clientes (Data de Inativação de
+    // 01 ao último dia do mês). Meses anteriores ficam fechados/congelados e
+    // os seguintes entram quando chegar o dia 01 deles.
+    const atual = mesAtual();
+    const meses = Object.keys(byMonth).filter(mk => mk === atual);
+    const baseBI = { total: (byMonth[atual] || []).length, de: `${atual}-01`, ate: ultimoDia(atual) };
+    log(`Base do BI em ${atual}: ${baseBI.total} clientes com Data de Inativação de ${fmtBR(baseBI.de)} a ${fmtBR(baseBI.ate)}.`);
+    await removerMesesFuturos(atual);
     if(DRY){
       await pedidosEFechamento(cfg);
       meses.forEach(mk => log(`[simulação] ${mk}: ${byMonth[mk].length} clientes`));
@@ -112,7 +119,7 @@ async function runSync(cfg, origem){
     const resumo = [];
     const label = `Qlik ${cfg.qlik.appId}${cfg.qlik.objectId ? "/" + cfg.qlik.objectId : ""}`;
     for(const mk of meses){
-      const r = await commitMonth(db, mk, byMonth[mk], label);
+      const r = await commitMonth(db, mk, byMonth[mk], label, baseBI);
       log(`${mk}: ${r.novos} novos, ${r.atualizados} atualizados`);
       resumo.push(r);
     }
@@ -141,6 +148,16 @@ async function runSync(cfg, origem){
 function mesAtual(){
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+const fmtBR = (iso) => iso.split("-").reverse().join("/");
+async function removerMesesFuturos(atual){
+  const tag = DRY ? "[simulação] " : "";
+  const snap = await db.collection("months").get();
+  for(const mk of snap.docs.map(d => d.id).filter(id => /^\d{4}-\d{2}$/.test(id) && id > atual).sort()){
+    const r = await removeFutureMonth(db, mk, { dryRun: DRY });
+    if(r.apagado) log(`${tag}${mk}: mês futuro removido (${r.total} clientes, nenhum trabalhado). Volta no dia 01 do mês.`);
+    else log(`${tag}${mk}: mês futuro mantido — ${r.trabalhados.length} cliente(s) já trabalhado(s): ${r.trabalhados.slice(0, 20).map(x => `${x.cod} [${x.motivo}]`).join(", ")}`);
+  }
 }
 function ultimoDia(mk){
   const [y, m] = mk.split("-").map(Number);

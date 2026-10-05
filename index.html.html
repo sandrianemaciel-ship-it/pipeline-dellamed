@@ -1543,6 +1543,13 @@ const STATUS_KEY_MIGRATION = {pendente:"inativam", impedido:"ganho", recuperado:
 //   • Depois do fechamento o mês fica congelado (meta.fechado): a página não
 //     grava mais nada nele, e a sincronização também não.
 const TAG_PEDIDO_IDENTIFICADO = "PEDIDO IDENTIFICADO, MOVA PARA GANHO";
+// Base do BI do mês (gravada pela sincronização no meta do mês): quantos
+// clientes o Qlik tem com Data de Inativação do dia 01 ao último dia do mês.
+function baseBiTexto(){
+  const b = state.meta && state.meta.baseBI;
+  if(!b) return "";
+  return `Base do BI ${fmtMonthKey(state.meta.monthKey||state.monthKey)}: ${b.total} cliente(s) com data de inativação de ${fmtDate(b.de)} a ${fmtDate(b.ate)} · ${state.leads.length} na pipeline`;
+}
 function hasPedidoTag(l){ return !!(l && l.pedidoIdentificado) && l.stage!=="ganho"; }
 function isMonthFrozen(){ return !!(state.meta && state.meta.fechado); }
 function frozenMsg(){
@@ -2205,7 +2212,8 @@ function renderShortcuts(){
   });
   const meta = document.createElement("div");
   meta.className = "shortcuts-meta";
-  meta.textContent = "Atalhos recalculados a partir da data de hoje (" + new Date().toLocaleDateString("pt-BR") + ")";
+  meta.textContent = "Atalhos recalculados a partir da data de hoje (" + new Date().toLocaleDateString("pt-BR") + ")"
+    + (baseBiTexto() ? " · " + baseBiTexto() : "");
   wrap.appendChild(meta);
 }
 
@@ -2403,7 +2411,8 @@ async function renderDashboard(){
   // estágio/status atual (usa a mesma base de leadsIgnoringStatusFilter()
   // já calculada acima para a meta "Impedi de inativar" — respeita os
   // demais filtros ativos, ex.: Vendedor, mas nunca o filtro de Status).
-  const inativariamTile = kpiTile("Inativariam no mês", impedirTotal, "Total de clientes do mês, independente do estágio atual");
+  const inativariamTile = kpiTile("Inativariam no mês", impedirTotal, "Total de clientes do mês, independente do estágio atual")
+    + (state.meta && state.meta.baseBI ? kpiTile("Base do BI no mês", state.meta.baseBI.total, `Data de inativação de ${fmtDate(state.meta.baseBI.de)} a ${fmtDate(state.meta.baseBI.ate)} (Qlik)`) : "");
   const kpiTilesHtml = inativariamTile + stageOrder.map(key=>{
     const stage = STAGES.find(s=>s.key===key);
     const c = stageCounts[key]||0;

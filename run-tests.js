@@ -4,7 +4,7 @@ process.env.TZ = "America/Sao_Paulo";
 const assert = require("assert");
 const { mapRows } = require("./mapping");
 const { mergeMonth, commitMonth, groupByMonth, cleanMonth, cleanupMonth, CHUNK_SIZE,
-  indexPedidos, applyPedidosMonth, closeMonthLogic, commitPedidosMonth, closeMonth } = require("./firestoreSync");
+  indexPedidos, applyPedidosMonth, closeMonthLogic, commitPedidosMonth, closeMonth, removeFutureMonth } = require("./firestoreSync");
 const { readAllPages, orderedHeaders } = require("./qlik");
 const L = require("./logic");
 
@@ -301,6 +301,39 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
       assert.strictEqual((await cleanupMonth(db, "2026-09", {})).congelado, true);
       assert.strictEqual((await closeMonth(db, "2026-09")).jaFechado, true);
       assert.strictEqual(JSON.stringify(db.store), congelado);
+    });
+  }
+
+  console.log("Um mês por vez");
+  {
+    const base = { ...byMonth["2026-09"][0], statusErp: "Ativo" };
+    await t("base do BI do mês fica no meta e só regrava quando muda", async () => {
+      const db = fakeFirestore();
+      const rows = [{ ...base, cod: "3001", dtInat: "2026-10-03" }, { ...base, cod: "3002", dtInat: "2026-10-30" }];
+      await commitMonth(db, "2026-10", rows, "Qlik", { total: 2, de: "2026-10-01", ate: "2026-10-31" });
+      assert.strictEqual(db.store["months/2026-10"].baseBI.total, 2);
+      assert.strictEqual(db.store["months/2026-10"].baseBI.ate, "2026-10-31");
+      const em = db.store["months/2026-10"].baseBI.em;
+      const r = await commitMonth(db, "2026-10", rows, "Qlik", { total: 2, de: "2026-10-01", ate: "2026-10-31" });
+      assert.strictEqual(r.atualizados, 0);
+      assert.strictEqual(db.store["months/2026-10"].baseBI.em, em);
+      await commitMonth(db, "2026-10", rows.concat([{ ...base, cod: "3003", dtInat: "2026-10-15" }]), "Qlik", { total: 3, de: "2026-10-01", ate: "2026-10-31" });
+      assert.strictEqual(db.store["months/2026-10"].baseBI.total, 3);
+    });
+    await t("mês futuro sem cliente trabalhado é removido; com cliente trabalhado fica", async () => {
+      const db = fakeFirestore();
+      const put = (mk, leads) => { const m = mergeMonth(mk, null, [], leads, "Qlik"); db.store["months/" + mk] = m.meta; db.store[`months/${mk}/chunks/c0`] = m.chunks[0]; };
+      put("2026-11", [{ ...base, cod: "4001", dtInat: "2026-11-10" }]);
+      put("2026-12", [{ ...base, cod: "4002", dtInat: "2026-12-10" }]);
+      db.store["months/2026-12/chunks/c0"].leads[0].notes = "ligar dia 2";
+      const sim = await removeFutureMonth(db, "2026-11", { dryRun: true });
+      assert.strictEqual(sim.apagado, true);
+      assert.ok("months/2026-11" in db.store);
+      assert.strictEqual((await removeFutureMonth(db, "2026-11")).apagado, true);
+      assert.ok(!("months/2026-11" in db.store) && !("months/2026-11/chunks/c0" in db.store));
+      const dez = await removeFutureMonth(db, "2026-12");
+      assert.strictEqual(dez.apagado, false);
+      assert.deepStrictEqual(dez.trabalhados.map(x => x.cod), ["4002"]);
     });
   }
 

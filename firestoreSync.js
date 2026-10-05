@@ -85,7 +85,9 @@ function sameData(a, b){
   return true;
 }
 
-async function commitMonth(db, monthKey, incomingRows, sourceLabel){
+// baseBI (opcional): {total, de, ate} = quantos clientes o BI tem com Data
+// de Inativação dentro do mês; fica no meta para a página mostrar.
+async function commitMonth(db, monthKey, incomingRows, sourceLabel, baseBI = null){
   const monthRef = db.doc("months/" + monthKey);
   return db.runTransaction(async (tx) => {
     const metaSnap = await tx.get(monthRef);
@@ -101,7 +103,9 @@ async function commitMonth(db, monthKey, incomingRows, sourceLabel){
       snaps.forEach((s, i) => { chunks[i] = s.exists ? { ...s.data(), leads: s.data().leads || [] } : { leads: [] }; });
     }
     const res = mergeMonth(monthKey, meta, chunks, incomingRows, sourceLabel);
-    if(!res.touched.size && metaSnap.exists){
+    const baseMudou = baseBI && !(meta && meta.baseBI && meta.baseBI.total === baseBI.total);
+    if(baseBI) res.meta.baseBI = baseMudou ? { ...baseBI, em: L.nowISO() } : meta.baseBI;
+    if(!res.touched.size && metaSnap.exists && !baseMudou){
       return { monthKey, novos: 0, atualizados: 0, semMudanca: res.semMudanca, total: incomingRows.length };
     }
     for(const ci of res.touched){
@@ -353,7 +357,24 @@ async function closeMonth(db, monthKey, { dryRun = false, pedidosByCod = null } 
   });
 }
 
+// Meses depois do mês vigente: a pipeline trabalha um mês por vez, então
+// meses futuros gravados antes desta regra são apagados — só se ninguém
+// trabalhou nenhum cliente deles (senão ficam e vão para o log).
+async function removeFutureMonth(db, monthKey, { dryRun = false } = {}){
+  const monthRef = db.doc("months/" + monthKey);
+  return db.runTransaction(async (tx) => {
+    const m = await loadMonthTx(tx, monthRef);
+    if(!m) return { monthKey, apagado: false, total: 0, trabalhados: [] };
+    const leads = m.chunks.flatMap(c => c.leads || []);
+    const trabalhados = leads.filter(l => workedReason(l)).map(l => ({ cod: l.cod, motivo: workedReason(l) }));
+    if(trabalhados.length || m.meta.fechado) return { monthKey, apagado: false, total: leads.length, trabalhados };
+    if(!dryRun){ m.refs.forEach(r => tx.delete(r)); tx.delete(monthRef); }
+    return { monthKey, apagado: true, total: leads.length, trabalhados };
+  });
+}
+
 module.exports = {
+  removeFutureMonth,
   groupByMonth, mergeMonth, commitMonth, cleanMonth, cleanupMonth, CHUNK_SIZE,
   indexPedidos, applyPedidosMonth, closeMonthLogic, commitPedidosMonth, closeMonth, TAG_PEDIDO_IDENTIFICADO
 };

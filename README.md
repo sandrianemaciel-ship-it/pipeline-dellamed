@@ -61,6 +61,15 @@ A limpeza compara o que está no Firestore com a leitura correta do Qlik:
 - **Mantém** os clientes suspeitos que o vendedor já trabalhou e lista cada um no log para revisão manual. Os dados vindos do Qlik são corrigidos na sincronização, e o que o vendedor preencheu continua lá.
 - Um mês que só tinha clientes trocados é apagado.
 
+## Um mês por vez
+
+A pipeline trabalha só o **mês vigente**. A sincronização traz do BI os clientes com Data de Inativação entre o dia 01 e o último dia do mês atual (em outubro/2026, de 01/10/2026 a 31/10/2026):
+
+- No **dia 01** entra a base do mês novo, e o mês anterior é fechado e congelado (veja abaixo).
+- Durante o mês, cada sincronização atualiza os clientes do mês e acrescenta quem passar a ter Data de Inativação dentro dele. Quem já estava na pipeline não sai, mesmo que o ERP mude a data.
+- O total do BI para o mês fica gravado no próprio mês. Ao escolher o mês no filtro, a página mostra "Base do BI no mês" ao lado do número de clientes na pipeline.
+- Meses futuros não são gravados. Os que já existiam foram removidos automaticamente, desde que nenhum cliente deles tivesse sido trabalhado.
+
 ## Pedido identificado e fechamento do mês
 
 A cada sincronização o serviço consulta a pasta **Pedidos** do Qlik: pedidos por BP (`COD_CLIENTE`), com `DATA_EMISSAO` dentro do mês da pipeline e valor `sum(VL_TOTAL)` maior que zero. É a mesma conta de "Valor Total de Pedidos (- Canc)", em que os cancelamentos já entram negativos.
