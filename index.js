@@ -1,0 +1,141 @@
+"use strict";
+// Serviço de sincronização Qlik Sense -> Firestore da Pipeline de Retenção.
+//   node src/index.js --once       roda uma vez e sai (bom para o Agendador de Tarefas)
+//   node src/index.js --dry-run    lê o Qlik e mostra o que faria, sem gravar
+//   node src/index.js              fica rodando: agenda (CRON) + atende o botão da página
+process.env.TZ = process.env.TZ || "America/Sao_Paulo"; // "mês atual" das regras = horário de Brasília
+require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const cron = require("node-cron");
+const admin = require("firebase-admin");
+const { fetchTable } = require("./qlik");
+const { mapRows } = require("./mapping");
+const { groupByMonth, commitMonth } = require("./firestoreSync");
+
+const args = new Set(process.argv.slice(2));
+const DRY = args.has("--dry-run");
+const ONCE = args.has("--once") || DRY;
+
+function log(...a){ console.log(new Date().toLocaleString("pt-BR"), "-", ...a); }
+
+function loadConfig(){
+  const e = process.env;
+  const need = (k) => { if(!e[k]) throw new Error(`Faltou ${k} no arquivo .env`); return e[k]; };
+  const authMode = (e.QLIK_AUTH || "jwt").toLowerCase();
+  const qlik = {
+    host: need("QLIK_HOST"),
+    appId: need("QLIK_APP_ID"),
+    objectId: e.QLIK_OBJECT_ID || null,
+    fields: e.QLIK_FIELDS ? e.QLIK_FIELDS.split("|").map(s => s.trim()).filter(Boolean) : null,
+    authMode,
+    virtualProxy: e.QLIK_VIRTUAL_PROXY || "",
+    jwt: authMode === "jwt" ? need("QLIK_JWT") : null,
+    certRoot: e.QLIK_CERT_ROOT, certClient: e.QLIK_CERT_CLIENT, certKey: e.QLIK_CERT_KEY,
+    enginePort: Number(e.QLIK_ENGINE_PORT || 4747),
+    userDirectory: e.QLIK_USER_DIRECTORY || "INTERNAL", userId: e.QLIK_USER_ID || "sa_api",
+    rejectUnauthorized: e.QLIK_REJECT_UNAUTHORIZED !== "false"
+  };
+  if(authMode === "cert") ["QLIK_CERT_ROOT", "QLIK_CERT_CLIENT", "QLIK_CERT_KEY"].forEach(need);
+  const mapFile = path.resolve(e.COLUMN_MAP_FILE || "config/column-map.json");
+  const columnMap = fs.existsSync(mapFile) ? JSON.parse(fs.readFileSync(mapFile, "utf8")) : {};
+  return {
+    qlik, columnMap,
+    serviceAccount: e.FIREBASE_SERVICE_ACCOUNT || "config/firebase-service-account.json",
+    cron: e.SYNC_CRON || "0 7 * * 1-5",
+    fromMonth: e.SYNC_FROM_MONTH || "2026-09"
+  };
+}
+
+let db = null;
+function initFirestore(cfg){
+  if(db) return db;
+  // No GitHub Actions a chave vem inteira num segredo (FIREBASE_SERVICE_ACCOUNT_JSON);
+  // numa máquina local, vem do arquivo indicado em FIREBASE_SERVICE_ACCOUNT.
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+    || fs.readFileSync(path.resolve(cfg.serviceAccount), "utf8");
+  const sa = JSON.parse(raw);
+  admin.initializeApp({ credential: admin.credential.cert(sa) });
+  db = admin.firestore();
+  return db;
+}
+
+async function setStatus(data){
+  if(!db) return;
+  await db.doc("sync/status").set({ ...data, updatedAt: new Date().toISOString() }, { merge: true });
+}
+
+let running = false;
+async function runSync(cfg, origem){
+  if(running){ log("Sincronização já em andamento — pedido ignorado."); return; }
+  running = true;
+  const startedAt = new Date().toISOString();
+  try{
+    log(`Iniciando sincronização (${origem})...`);
+    await setStatus({ state: "running", origem, startedAt, message: "Buscando dados no Qlik..." });
+    const table = await fetchTable(cfg.qlik, log);
+    const { records, unmapped, semData } = mapRows(table, cfg.columnMap);
+    if(unmapped.length) log("Colunas do Qlik ignoradas (sem correspondência):", unmapped.join(", "));
+    if(semData) log(`${semData} linhas sem Data Inativação foram ignoradas.`);
+    if(!records.length) throw new Error("Nenhuma linha válida (confira as colunas Cód Cliente e Data Inativação).");
+    const semVend = records.filter(r => !(r.vendInt || r.keyAcc || r.prospect || r.rep || r.sucCli)).length;
+    if(semVend / records.length > 0.7) log(`ATENÇÃO: ${semVend}/${records.length} sem Representante/Vendedor — confira o mapeamento de colunas.`);
+
+    const byMonth = groupByMonth(records, cfg.fromMonth);
+    const meses = Object.keys(byMonth).sort();
+    if(DRY){
+      meses.forEach(mk => log(`[simulação] ${mk}: ${byMonth[mk].length} clientes`));
+      log("Exemplo do primeiro registro:", JSON.stringify(records[0]));
+      return;
+    }
+    const resumo = [];
+    const label = `Qlik ${cfg.qlik.appId}${cfg.qlik.objectId ? "/" + cfg.qlik.objectId : ""}`;
+    for(const mk of meses){
+      const r = await commitMonth(db, mk, byMonth[mk], label);
+      log(`${mk}: ${r.novos} novos, ${r.atualizados} atualizados`);
+      resumo.push(r);
+    }
+    const novos = resumo.reduce((s, r) => s + r.novos, 0);
+    const atualizados = resumo.reduce((s, r) => s + r.atualizados, 0);
+    await setStatus({
+      state: "ok", origem, startedAt, finishedAt: new Date().toISOString(),
+      message: `${novos} novos e ${atualizados} atualizados em ${meses.length} mês(es).`,
+      meses: resumo
+    });
+    log("Sincronização concluída.");
+  }catch(err){
+    log("ERRO:", err && err.message || err);
+    await setStatus({ state: "error", origem, startedAt, finishedAt: new Date().toISOString(),
+      message: String(err && err.message || err) }).catch(() => {});
+    if(ONCE) process.exitCode = 1;
+  }finally{
+    running = false;
+  }
+}
+
+async function main(){
+  const cfg = loadConfig();
+  if(!DRY) initFirestore(cfg);
+  if(ONCE){ await runSync(cfg, DRY ? "simulação" : "manual"); return; }
+
+  // 1) Agenda automática
+  if(!cron.validate(cfg.cron)) throw new Error("SYNC_CRON inválido: " + cfg.cron);
+  cron.schedule(cfg.cron, () => runSync(cfg, "agendada"), { timezone: "America/Sao_Paulo" });
+  log(`Agendado: "${cfg.cron}" (horário de Brasília).`);
+
+  // 2) Botão "Sincronizar com Qlik" da página: ela grava sync/request.
+  let lastHandled = null;
+  const statusSnap = await db.doc("sync/status").get();
+  if(statusSnap.exists) lastHandled = statusSnap.data().lastRequestAt || null;
+  db.doc("sync/request").onSnapshot(snap => {
+    if(!snap.exists) return;
+    const req = snap.data();
+    if(!req.requestedAt || req.requestedAt === lastHandled) return;
+    lastHandled = req.requestedAt;
+    setStatus({ lastRequestAt: req.requestedAt, requestedBy: req.requestedBy || null }).catch(() => {});
+    runSync(cfg, "botão" + (req.requestedBy ? ` (${req.requestedBy})` : ""));
+  }, err => log("Erro ao escutar pedidos da página:", err.message));
+  log("Escutando o botão da página. Deixe este processo rodando.");
+}
+
+main().catch(err => { log("Falha ao iniciar:", err.message); process.exit(1); });

@@ -1,0 +1,7 @@
+{
+  "_comentario": "Use só se o nome da coluna no Qlik for diferente do export do ERP. Renomeie para column-map.json. Chaves possíveis: cod, cli, cnpj, uf, cid, seg, tel, email, temCarteira, pedPend, inad, valVenc, dtCad, dt1Fat, dtUltFat, dtInat, statusErp, valorPedidoExplicit, dtUltPedAberto, rep, vendInt, keyAcc, prospect, sucCli, codGrupo, grp",
+  "Código do Cliente": "cod",
+  "Nome Cliente": "cli",
+  "Dt. Inativação Prevista": "dtInat",
+  "Vendedor Responsável": "vendInt"
+}
