@@ -17,6 +17,10 @@ on:
         description: "Só simular: mostra no log o que faria, sem gravar nada"
         type: boolean
         default: false
+      diagnostico:
+        description: "Só diagnóstico do Firestore (o que está gravado em cada mês); não grava nada"
+        type: boolean
+        default: false
       reconhecer:
         description: "Só reconhecimento do Qlik (pastas, campos e fórmulas); não grava nada"
         type: boolean
@@ -38,7 +42,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Sincronizar
-        run: node index.js --once ${{ inputs.limpar && '--limpar' || '' }} ${{ inputs.simular && '--dry-run' || '' }} ${{ inputs.reconhecer && '--reconhecer' || '' }}
+        run: node index.js --once ${{ inputs.limpar && '--limpar' || '' }} ${{ inputs.simular && '--dry-run' || '' }} ${{ inputs.reconhecer && '--reconhecer' || '' }} ${{ inputs.diagnostico && '--diagnostico' || '' }}
         env:
           QLIK_HOST: ${{ secrets.QLIK_HOST }}
           QLIK_APP_ID: ${{ secrets.QLIK_APP_ID }}

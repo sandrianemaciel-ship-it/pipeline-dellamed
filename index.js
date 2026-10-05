@@ -19,6 +19,7 @@ const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
 const ONCE = args.has("--once") || DRY;
 const RECONHECER = args.has("--reconhecer");
+const DIAGNOSTICO = args.has("--diagnostico");
 const LIMPAR = args.has("--limpar") || process.env.LIMPAR_COLUNAS_TROCADAS === "true";
 
 function log(...a){ console.log(new Date().toLocaleString("pt-BR"), "-", ...a); }
@@ -229,6 +230,29 @@ async function limparColunasTrocadas(cfg, records){
 
 async function main(){
   const cfg = loadConfig();
+  if(DIAGNOSTICO){
+    // Só leitura: o que está gravado em cada mês do Firestore.
+    initFirestore(cfg);
+    const snap = await db.collection("months").get();
+    for(const d of snap.docs){
+      const meta = d.data();
+      const leads = [];
+      for(let i = 0; i < (meta.chunkCount || 0); i++){
+        const c = await db.doc(`months/${d.id}/chunks/c${i}`).get();
+        if(c.exists) leads.push(...(c.data().leads || []));
+      }
+      const porMes = {}, porEstagio = {};
+      leads.forEach(l => { const mk = (l.dtInat || "sem data").slice(0, 7); porMes[mk] = (porMes[mk] || 0) + 1;
+        porEstagio[l.stage] = (porEstagio[l.stage] || 0) + 1; });
+      const codsUnicos = new Set(leads.map(l => l.cod)).size;
+      log(`[diagnóstico] months/${d.id}: ${leads.length} clientes nos blocos (${codsUnicos} códigos únicos), totalLeads=${meta.totalLeads}, ` +
+        `fechado=${!!meta.fechado}, baseBI=${meta.baseBI ? meta.baseBI.total : "—"}, importado ${meta.importedAt} por ${meta.sourceFilename}`);
+      log(`   Data de Inativação por mês: ${Object.entries(porMes).sort().map(([k, v]) => `${k}=${v}`).join(", ")}`);
+      log(`   Estágios: ${Object.entries(porEstagio).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+      log(`   Exemplos: ${leads.slice(0, 3).map(l => `${l.cod} dtInat=${l.dtInat} monthKey=${l.monthKey}`).join(" | ")}`);
+    }
+    return;
+  }
   if(RECONHECER){
     // Só leitura: mostra pastas, objetos, fórmulas e campos dos apps.
     const ids = [...new Set([cfg.qlik.appId, process.env.QLIK_PEDIDOS_APP_ID].filter(Boolean))];
