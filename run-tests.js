@@ -180,6 +180,9 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
     const first = mergeMonth("2026-10", null, [], gravados, "Qlik");
     const l1004 = first.chunks[0].leads.find(l => l.cod === "1004");
     Object.assign(l1004, { stage: "negociando", status: "negociando", notes: "ligar" });
+    // a página move sozinha para Inativado e atualiza lastTouched: continua "não trabalhado"
+    const l1003 = first.chunks[0].leads.find(l => l.cod === "1003");
+    Object.assign(l1003, { stage: "inativo", status: "inativo", lastTouched: "2026-10-01T10:00:00.000Z" });
 
     await t("remove só os trocados que ninguém trabalhou", () => {
       const r = cleanMonth("2026-10", first.meta, JSON.parse(JSON.stringify(first.chunks)), freshByCod);

@@ -133,7 +133,8 @@ function workedReason(l){
   }
   if(l.linhasPositivadas && l.linhasPositivadas.length) return "preencheu linhasPositivadas";
   if(l.vendedorAuto === false) return "vendedor escolhido à mão";
-  if(l.lastTouched && l.createdAt && l.lastTouched !== l.createdAt) return "card salvo na página";
+  // lastTouched NÃO serve de sinal: a página o atualiza sozinha ao mover
+  // para Inativado os clientes com data vencida (applyAutoInativoTransitions).
   return null;
 }
 function isUntouched(l){ return !workedReason(l); }
