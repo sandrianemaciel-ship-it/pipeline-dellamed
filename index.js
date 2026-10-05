@@ -156,6 +156,13 @@ async function pedidosEFechamento(cfg){
   const hoje = `${mesAtual()}-${String(d.getDate()).padStart(2, "0")}`;
   const fim = ultimoDia(abertos[abertos.length - 1]) < hoje ? ultimoDia(abertos[abertos.length - 1]) : hoje;
   const pedidos = await fetchPedidos({ ...cfg.qlik, appId: cfg.pedidosAppId || cfg.qlik.appId }, `${abertos[0]}-01`, fim, log);
+  // Trava: nenhum pedido no período inteiro não é plausível (leitura falhou ou
+  // o filtro de data não bateu). Sem pedidos, não mexe em tags nem fecha mês,
+  // para não mandar todo mundo para Perdido por engano.
+  if(!pedidos.length){
+    log("ATENÇÃO: nenhum pedido encontrado no Qlik para o período — tags e fechamento do mês não foram aplicados nesta execução.");
+    return "Pedidos: nenhum encontrado no Qlik (tags e fechamento suspensos).";
+  }
   const porCod = indexPedidos(pedidos);
   let tags = 0, novasTags = 0;
   for(const mk of abertos){
