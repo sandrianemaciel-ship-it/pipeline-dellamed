@@ -98,6 +98,7 @@ async function fetchTable(cfg, log = console.log){
       if(!hc) throw new Error(`O objeto ${cfg.objectId} não é uma tabela/gráfico com hipercubo.`);
       headers = orderedHeaders(hc);
       log(`Qlik: objeto ${cfg.objectId} com ${hc.qSize.qcy} linhas x ${hc.qSize.qcx} colunas.`);
+      log(`Qlik: qColumnOrder = ${JSON.stringify(hc.qColumnOrder || [])}; colunas na ordem lida: ${headers.join(" | ")}`);
       const rows = await readAllPages(obj, layout);
       return { headers, rows };
     }

@@ -92,7 +92,17 @@ async function runSync(cfg, origem){
     const meses = Object.keys(byMonth).sort();
     if(DRY){
       meses.forEach(mk => log(`[simulação] ${mk}: ${byMonth[mk].length} clientes`));
+      // Distribuição de TODAS as Datas de Inativação (inclusive antes de
+      // SYNC_FROM_MONTH), para conferir se a coluna lida é mesmo a certa.
+      const porMes = {};
+      records.forEach(r => { const mk = r.dtInat.slice(0, 7); porMes[mk] = (porMes[mk] || 0) + 1; });
+      const todos = Object.keys(porMes).sort();
+      log(`[simulação] Data Inativação vai de ${records.reduce((m, r) => r.dtInat < m ? r.dtInat : m, "9999")} a ${records.reduce((m, r) => r.dtInat > m ? r.dtInat : m, "0000")}.`);
+      log("[simulação] Clientes por mês de inativação (últimos 18 meses lidos):",
+        todos.slice(-18).map(mk => `${mk}=${porMes[mk]}`).join(", "));
       log("Exemplo do primeiro registro:", JSON.stringify(records[0]));
+      const ex = records.filter(r => r.dtInat.slice(0, 7) >= cfg.fromMonth).slice(0, 3);
+      ex.forEach(r => log("Exemplo a partir de " + cfg.fromMonth + ":", JSON.stringify(r)));
       return;
     }
     const resumo = [];
