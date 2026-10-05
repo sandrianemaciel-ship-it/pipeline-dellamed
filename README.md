@@ -61,6 +61,23 @@ A limpeza compara o que está no Firestore com a leitura correta do Qlik:
 - **Mantém** os clientes suspeitos que o vendedor já trabalhou e lista cada um no log para revisão manual. Os dados vindos do Qlik são corrigidos na sincronização, e o que o vendedor preencheu continua lá.
 - Um mês que só tinha clientes trocados é apagado.
 
+## Pedido identificado e fechamento do mês
+
+A cada sincronização o serviço consulta a pasta **Pedidos** do Qlik: pedidos por BP (`COD_CLIENTE`), com `DATA_EMISSAO` dentro do mês da pipeline e valor `sum(VL_TOTAL)` maior que zero. É a mesma conta de "Valor Total de Pedidos (- Canc)", em que os cancelamentos já entram negativos.
+
+- O cliente com pedido recebe a tag **PEDIDO IDENTIFICADO, MOVA PARA GANHO**, que aparece no card, no cadastro, no atalho "Pedido identificado" e no indicador do painel.
+- O **Valor de pedido** passa a ser o total desses pedidos. O vendedor pode editar o campo no cadastro do cliente; um valor digitado à mão não é mais trocado pela sincronização.
+- Se o pedido sumir do Qlik (cancelado), a tag sai e o histórico registra.
+
+**Fechamento (dia 01 do mês seguinte):** a primeira sincronização do dia 01 fecha o mês anterior.
+
+- Quem tem pedido identificado e não foi movido vai para **Ganho** ("Ganho automático").
+- Quem não está em Ganho nem em Negociação Perdida vai para **Negociação Perdida** ("Perdido automático").
+- Os dois casos ficam marcados como movidos **sem ação do vendedor**, com indicador próprio no painel, atalho e coluna na exportação.
+- Depois disso o mês fica **congelado**: a página mostra o mês como somente leitura e nem a sincronização, nem a importação, nem as rotinas automáticas gravam mais nada nele.
+
+Para desligar o fechamento automático, use `SYNC_FECHAMENTO=false`.
+
 ## Nomes de coluna reconhecidos automaticamente
 
 São os mesmos do export do ERP: Cód Cliente, Razão Social/Cliente, CNPJ, UF, Cidade, Segmento, Telefone, Email, Tem Carteira, Total Pedidos Pendentes, Inadimplente, Valor Vencido, Data Cadastro, Data 1º Faturamento, Data Último Faturamento, **Data Inativação**, Status Atual, Data Último Pedido Aberto, Valor de Pedido, Representante (Z1), Vendedor Interno (VE), Key Account (Z3), Prospect (Z5), Sucesso do Cliente (Z6).

@@ -161,6 +161,51 @@ async function readClientTable(app, cfg, log){
     return { headers, rows };
 }
 
+// Pedidos da pasta "Pedidos" do Qlik, por cliente (BP), emitidos entre
+// fromISO e toISO (AAAA-MM-DD, inclusive). Mesma conta da pasta:
+// "Valor Total de Pedidos (- Canc)" = sum(VL_TOTAL), com os cancelamentos já
+// negativos. Retorna [{ cod, pedido, valor, data }] só com valor > 0.
+function isoToSerial(iso){
+  const [y, m, d] = iso.split("-").map(Number);
+  return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 86400000);
+}
+async function fetchPedidos(cfg, fromISO, toISO, log = console.log){
+  const ini = isoToSerial(fromISO), fim = isoToSerial(toISO) + 1; // fim exclusivo (datas com hora)
+  const set = `{<DATA_EMISSAO={">=${ini}<${fim}"}>}`;
+  return withApp(cfg, async (app) => {
+    const obj = await app.createSessionObject({
+      qInfo: { qType: "pipeline-pedidos" },
+      qHyperCubeDef: {
+        qDimensions: [
+          { qDef: { qFieldDefs: ["COD_CLIENTE"] }, qNullSuppression: true },
+          { qDef: { qFieldDefs: ["CD_PEDIDO"] }, qNullSuppression: true }
+        ],
+        qMeasures: [
+          { qDef: { qDef: `Sum(${set} VL_TOTAL)` } },
+          { qDef: { qDef: `Min(${set} DATA_EMISSAO)` } }
+        ],
+        qSuppressZero: true,
+        qSuppressMissing: true,
+        qInitialDataFetch: []
+      }
+    });
+    const layout = await obj.getLayout();
+    const rows = await readAllPages(obj, layout);
+    const out = [];
+    for(const r of rows){
+      const cod = r[0] && (r[0].text || (r[0].num != null ? String(r[0].num) : null));
+      const pedido = r[1] && (r[1].text || (r[1].num != null ? String(r[1].num) : null));
+      const valor = r[2] && r[2].num != null ? r[2].num : 0;
+      const serial = r[3] && r[3].num;
+      if(!cod || !pedido || !(valor > 0)) continue;
+      const data = serial ? new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000).toISOString().slice(0, 10) : null;
+      out.push({ cod: String(cod).trim(), pedido: String(pedido).trim(), valor: Math.round(valor * 100) / 100, data });
+    }
+    log(`Qlik: pedidos emitidos de ${fromISO} a ${toISO}: ${rows.length} linhas, ${out.length} pedidos com valor > 0.`);
+    return out;
+  });
+}
+
 // Reconhecimento (só leitura): lista as pastas do app e, na pasta "Pedidos",
 // os objetos com seus campos e fórmulas, além das medidas mestras e dos
 // campos com nome de pedido/cliente/data/valor. Serve para montar a busca
@@ -221,4 +266,4 @@ function explainSocketError(err, d, url){
   return parts.join(" ");
 }
 
-module.exports = { fetchTable, withApp, discoverApp, buildSocketUrl, cellValue, readAllPages, orderedHeaders };
+module.exports = { fetchTable, fetchPedidos, isoToSerial, withApp, discoverApp, buildSocketUrl, cellValue, readAllPages, orderedHeaders };

@@ -11,9 +11,9 @@ const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const admin = require("firebase-admin");
-const { fetchTable, discoverApp } = require("./qlik");
+const { fetchTable, fetchPedidos, discoverApp } = require("./qlik");
 const { mapRows } = require("./mapping");
-const { groupByMonth, commitMonth, cleanupMonth } = require("./firestoreSync");
+const { groupByMonth, commitMonth, cleanupMonth, indexPedidos, commitPedidosMonth, closeMonth } = require("./firestoreSync");
 
 const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
@@ -50,7 +50,9 @@ function loadConfig(){
     qlik, columnMap,
     serviceAccount: e.FIREBASE_SERVICE_ACCOUNT || "config/firebase-service-account.json",
     cron: e.SYNC_CRON || "0 7 * * 1-5",
-    fromMonth: e.SYNC_FROM_MONTH || "2026-09"
+    fromMonth: e.SYNC_FROM_MONTH || "2026-09",
+    pedidosAppId: e.QLIK_PEDIDOS_APP_ID || null,
+    fechamento: e.SYNC_FECHAMENTO !== "false"
   };
 }
 
@@ -92,6 +94,7 @@ async function runSync(cfg, origem){
     const byMonth = groupByMonth(records, cfg.fromMonth);
     const meses = Object.keys(byMonth).sort();
     if(DRY){
+      await pedidosEFechamento(cfg);
       meses.forEach(mk => log(`[simulação] ${mk}: ${byMonth[mk].length} clientes`));
       // Distribuição de TODAS as Datas de Inativação (inclusive antes de
       // SYNC_FROM_MONTH), para conferir se a coluna lida é mesmo a certa.
@@ -115,9 +118,10 @@ async function runSync(cfg, origem){
     }
     const novos = resumo.reduce((s, r) => s + r.novos, 0);
     const atualizados = resumo.reduce((s, r) => s + r.atualizados, 0);
+    const extra = await pedidosEFechamento(cfg);
     await setStatus({
       state: "ok", origem, startedAt, finishedAt: new Date().toISOString(),
-      message: `${novos} novos e ${atualizados} atualizados em ${meses.length} mês(es).`,
+      message: `${novos} novos e ${atualizados} atualizados em ${meses.length} mês(es). ${extra}`.trim(),
       meses: resumo
     });
     log("Sincronização concluída.");
@@ -129,6 +133,46 @@ async function runSync(cfg, origem){
   }finally{
     running = false;
   }
+}
+
+// Depois de gravar os clientes: busca os pedidos do Qlik para os meses ainda
+// abertos (tag "PEDIDO IDENTIFICADO, MOVA PARA GANHO" e valor do pedido) e,
+// a partir do dia 01, fecha e congela os meses anteriores ao atual.
+function mesAtual(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function ultimoDia(mk){
+  const [y, m] = mk.split("-").map(Number);
+  return `${mk}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`;
+}
+async function pedidosEFechamento(cfg){
+  const tag = DRY ? "[simulação] " : "";
+  const snap = await db.collection("months").get();
+  const abertos = snap.docs.filter(d => /^\d{4}-\d{2}$/.test(d.id) && d.id >= cfg.fromMonth && !d.data().fechado)
+    .map(d => d.id).sort();
+  if(!abertos.length) return "";
+  const d = new Date();
+  const hoje = `${mesAtual()}-${String(d.getDate()).padStart(2, "0")}`;
+  const fim = ultimoDia(abertos[abertos.length - 1]) < hoje ? ultimoDia(abertos[abertos.length - 1]) : hoje;
+  const pedidos = await fetchPedidos({ ...cfg.qlik, appId: cfg.pedidosAppId || cfg.qlik.appId }, `${abertos[0]}-01`, fim, log);
+  const porCod = indexPedidos(pedidos);
+  let tags = 0, novasTags = 0;
+  for(const mk of abertos){
+    const r = await commitPedidosMonth(db, mk, porCod, { dryRun: DRY });
+    tags += r.identificados; novasTags += r.novos;
+    if(r.identificados || r.removidos) log(`${tag}${mk}: ${r.identificados} cliente(s) com pedido identificado (${r.novos} novos, ${r.removidos} tags removidas).`);
+  }
+  if(cfg.fechamento === false) return `${tags} com pedido identificado.`;
+  const atual = mesAtual();
+  const fechados = [];
+  for(const mk of abertos.filter(m => m < atual)){
+    const r = await closeMonth(db, mk, { dryRun: DRY, pedidosByCod: porCod });
+    if(r.jaFechado) continue;
+    log(`${tag}Fechamento ${mk}: ${r.ganhoAuto} movidos para Ganho (pedido identificado) e ${r.perdidoAuto} para Negociação Perdida, sem ação do vendedor. Mês congelado.`);
+    fechados.push(`${mk} (${r.ganhoAuto} ganho auto, ${r.perdidoAuto} perdido auto)`);
+  }
+  return `${tags} com pedido identificado (${novasTags} novos).` + (fechados.length ? ` Mês(es) fechado(s): ${fechados.join(", ")}.` : "");
 }
 
 // Remove do Firestore os clientes que foram gravados com as colunas do Qlik
@@ -170,7 +214,7 @@ async function main(){
     }
     return;
   }
-  if(!DRY || LIMPAR) initFirestore(cfg);
+  initFirestore(cfg); // na simulação só lê
   if(ONCE){ await runSync(cfg, DRY ? "simulação" : "manual"); return; }
 
   // 1) Agenda automática

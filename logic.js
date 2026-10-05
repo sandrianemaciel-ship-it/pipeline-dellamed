@@ -140,6 +140,9 @@ function applyImportToLead(existing, fresh, monthKey){
     monthKey, createdAt: existing.createdAt, lastTouched: existing.lastTouched,
     dataUpdatedAt: now, stage: existing.stage
   });
+  // Valor do pedido digitado pelo vendedor, ou vindo de pedido identificado no
+  // Qlik, não é trocado pelo valor da base.
+  if(existing.valorPedidoManual || existing.pedidoIdentificado) merged.valorPedido = existing.valorPedido;
   const computed = computeStatusStage(merged);
   merged.status = computed.status;
   merged.stage = computed.stage;

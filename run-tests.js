@@ -3,7 +3,8 @@
 process.env.TZ = "America/Sao_Paulo";
 const assert = require("assert");
 const { mapRows } = require("./mapping");
-const { mergeMonth, commitMonth, groupByMonth, cleanMonth, cleanupMonth, CHUNK_SIZE } = require("./firestoreSync");
+const { mergeMonth, commitMonth, groupByMonth, cleanMonth, cleanupMonth, CHUNK_SIZE,
+  indexPedidos, applyPedidosMonth, closeMonthLogic, commitPedidosMonth, closeMonth } = require("./firestoreSync");
 const { readAllPages, orderedHeaders } = require("./qlik");
 const L = require("./logic");
 
@@ -222,6 +223,84 @@ const T = (text, num) => ({ text, num: num == null ? null : num });
       assert.strictEqual(r.mesApagado, true);
       assert.ok(!("months/2027-03" in db.store));
       assert.ok(!("months/2027-03/chunks/c0" in db.store));
+    });
+  }
+
+  console.log("Pedidos identificados e fechamento do mês");
+  {
+    const base = { ...byMonth["2026-09"][0], statusErp: "Ativo" };
+    const mk = (cod, extra = {}) => ({ ...L.applyImportToLead(null, { ...base, cod, dtInat: "2026-09-20", valorPedido: 0 }, "2026-09"), ...extra });
+    const pedidos = indexPedidos([
+      { cod: "0000002001", pedido: "P1", valor: 1500.5, data: "2026-09-12" },   // BP com zeros à esquerda
+      { cod: "2001", pedido: "P2", valor: 499.5, data: "2026-09-25" },
+      { cod: "2002", pedido: "P3", valor: 800, data: "2026-10-02" },            // fora do mês
+      { cod: "2003", pedido: "P4", valor: 300, data: "2026-09-03" }
+    ]);
+    const chunks = () => [{ leads: [
+      mk("2001"), mk("2002"),
+      mk("2003", { valorPedido: 999, valorPedidoManual: true }),
+      mk("2004", { stage: "negociando", status: "negociando" }),
+      mk("2005", { stage: "ganho", status: "ganho" }),
+      mk("2006", { stage: "perdido", status: "perdido" })
+    ] }];
+
+    await t("pedido do BP no mês vira tag PEDIDO IDENTIFICADO e preenche o valor", () => {
+      const c = chunks();
+      const r = applyPedidosMonth("2026-09", c, pedidos);
+      const [l1, l2, l3] = c[0].leads;
+      assert.strictEqual(r.identificados, 2);
+      assert.deepStrictEqual(l1.pedidoIdentificado.pedidos, ["P1", "P2"]);
+      assert.strictEqual(l1.pedidoIdentificado.valor, 2000);
+      assert.strictEqual(l1.pedidoIdentificado.dtPrimeiro, "2026-09-12");
+      assert.strictEqual(l1.valorPedido, 2000);
+      assert.ok(l1.hist[0].t.startsWith("PEDIDO IDENTIFICADO, MOVA PARA GANHO"));
+      assert.ok(!l2.pedidoIdentificado); // pedido de outubro não conta para setembro
+      assert.strictEqual(l3.valorPedido, 999); // valor digitado pelo vendedor fica
+      // rodar de novo sem mudança não regrava
+      assert.strictEqual(applyPedidosMonth("2026-09", c, pedidos).touched.size, 0);
+      // pedido cancelado some do Qlik: tag removida
+      const r2 = applyPedidosMonth("2026-09", c, indexPedidos([{ cod: "2003", pedido: "P4", valor: 300, data: "2026-09-03" }]));
+      assert.strictEqual(r2.removidos, 1);
+      assert.strictEqual(c[0].leads[0].pedidoIdentificado, null);
+    });
+    await t("importação não troca o valor do pedido digitado ou identificado", () => {
+      const c = chunks();
+      applyPedidosMonth("2026-09", c, pedidos);
+      const again = L.applyImportToLead(c[0].leads[0], { ...base, cod: "2001", dtInat: "2026-09-20", valorPedido: 10 }, "2026-09");
+      assert.strictEqual(again.valorPedido, 2000);
+      const manual = L.applyImportToLead(c[0].leads[2], { ...base, cod: "2003", dtInat: "2026-09-20", valorPedido: 10 }, "2026-09");
+      assert.strictEqual(manual.valorPedido, 999);
+    });
+    await t("fechamento: tag vira Ganho, resto vira Perdido automático, Ganho/Perdido ficam", () => {
+      const c = chunks();
+      applyPedidosMonth("2026-09", c, pedidos);
+      const r = closeMonthLogic("2026-09", { monthKey: "2026-09" }, c);
+      const by = Object.fromEntries(c[0].leads.map(l => [l.cod, l]));
+      assert.strictEqual(r.meta.fechado, true);
+      assert.strictEqual(by["2001"].stage, "ganho"); assert.strictEqual(by["2001"].fechamentoAuto, "ganho");
+      assert.strictEqual(by["2003"].stage, "ganho");
+      assert.strictEqual(by["2002"].stage, "perdido"); assert.strictEqual(by["2002"].fechamentoAuto, "perdido");
+      assert.strictEqual(by["2004"].stage, "perdido"); assert.strictEqual(by["2004"].fechamentoAuto, "perdido");
+      assert.ok(by["2004"].hist[0].t.includes("sem ação do vendedor"));
+      assert.strictEqual(by["2005"].fechamentoAuto, undefined);
+      assert.strictEqual(by["2006"].fechamentoAuto, undefined);
+      assert.strictEqual(r.ganhoAuto, 2); assert.strictEqual(r.perdidoAuto, 2);
+    });
+    await t("mês fechado fica congelado: sincronização, pedidos, limpeza e novo fechamento não mexem", async () => {
+      const db = fakeFirestore();
+      const m = mergeMonth("2026-09", null, [], [{ ...base, cod: "2001", dtInat: "2026-09-20" }], "Qlik");
+      db.store["months/2026-09"] = m.meta;
+      db.store["months/2026-09/chunks/c0"] = m.chunks[0];
+      await commitPedidosMonth(db, "2026-09", pedidos);
+      const f = await closeMonth(db, "2026-09");
+      assert.strictEqual(f.ganhoAuto, 1);
+      const congelado = JSON.stringify(db.store);
+      const s1 = await commitMonth(db, "2026-09", [{ ...base, cod: "2001", dtInat: "2026-09-20", uf: "PR" }, { ...base, cod: "2999", dtInat: "2026-09-21" }], "Qlik");
+      assert.strictEqual(s1.congelado, true);
+      assert.strictEqual((await commitPedidosMonth(db, "2026-09", indexPedidos([]))).congelado, true);
+      assert.strictEqual((await cleanupMonth(db, "2026-09", {})).congelado, true);
+      assert.strictEqual((await closeMonth(db, "2026-09")).jaFechado, true);
+      assert.strictEqual(JSON.stringify(db.store), congelado);
     });
   }
 

@@ -505,6 +505,10 @@
   .chip.status-perdido{background:var(--bad-soft); color:var(--bad);}
   .chip.status-inativam{background:var(--warn-soft); color:var(--warn);}
   .chip.status-inativo{background:var(--surface-3); color:var(--ink-faint);}
+  .tag-pedido{display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:800; letter-spacing:.02em; background:var(--good); color:#fff;}
+  .tag-auto{display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:700; background:var(--surface-3); color:var(--ink-soft, var(--ink));}
+  .tag-auto.perdido{background:var(--bad); color:#fff;}
+  .frozen-banner{margin:0 0 12px; padding:10px 14px; border-radius:10px; background:var(--surface-3); font-weight:600; font-size:13px;}
   .chip.status-proposta{background:#7a5cd622; color:#7a5cd6;}
   .chip.status-negociando{background:#c98a1f22; color:#c98a1f;}
   .card-days{font-size:10.5px; font-weight:700;}
@@ -1509,6 +1513,9 @@ function applyImportToLead(existing, fresh, monthKey){
     monthKey, createdAt: existing.createdAt, lastTouched: existing.lastTouched,
     dataUpdatedAt: now, stage: existing.stage
   });
+  // Valor do pedido digitado pelo vendedor, ou vindo de pedido identificado no
+  // Qlik, não é trocado pelo valor da base.
+  if(existing.valorPedidoManual || existing.pedidoIdentificado) merged.valorPedido = existing.valorPedido;
   const computed = computeStatusStage(merged);
   merged.status = computed.status;
   merged.stage = computed.stage;
@@ -1522,6 +1529,37 @@ function applyImportToLead(existing, fresh, monthKey){
 // consolidated (pendente/impedido/recuperado → inativam/ganho). Runs on every
 // load so old data displays correctly without requiring a re-import.
 const STATUS_KEY_MIGRATION = {pendente:"inativam", impedido:"ganho", recuperado:"ganho"};
+
+// Pedido identificado e fechamento do mês — gravados pelo serviço de
+// sincronização com o Qlik (qlik-sync):
+//   • lead.pedidoIdentificado = {pedidos:[CD_PEDIDO...], valor, dtPrimeiro}
+//     quando a pasta Pedidos do Qlik tem pedido (DATA_EMISSAO dentro do mês
+//     da pipeline, VL_TOTAL > 0) para o BP do cliente. Enquanto o cliente não
+//     estiver em Ganho, o card mostra a tag TAG_PEDIDO_IDENTIFICADO.
+//   • No dia 01 do mês seguinte o mês é fechado: quem tem pedido identificado
+//     vai para Ganho; quem não está em Ganho nem em Negociação Perdida vai para
+//     Negociação Perdida. Os dois casos ficam marcados em lead.fechamentoAuto
+//     ("ganho"/"perdido") — movidos sem ação do vendedor.
+//   • Depois do fechamento o mês fica congelado (meta.fechado): a página não
+//     grava mais nada nele, e a sincronização também não.
+const TAG_PEDIDO_IDENTIFICADO = "PEDIDO IDENTIFICADO, MOVA PARA GANHO";
+function hasPedidoTag(l){ return !!(l && l.pedidoIdentificado) && l.stage!=="ganho"; }
+function isMonthFrozen(){ return !!(state.meta && state.meta.fechado); }
+function frozenMsg(){
+  const m = state.meta || {};
+  return `O mês ${fmtMonthKey(m.monthKey||state.monthKey)} foi fechado${m.fechadoEm ? " em "+new Date(m.fechadoEm).toLocaleDateString("pt-BR") : ""} e está congelado — não aceita mais alterações.`;
+}
+function pedidoTagHtml(l){
+  if(!hasPedidoTag(l)) return "";
+  const p = l.pedidoIdentificado;
+  const tip = `Pedido(s) ${(p.pedidos||[]).join(", ")} · ${fmtMoney(p.valor)}${p.dtPrimeiro?" · desde "+fmtDate(p.dtPrimeiro):""}`;
+  return `<span class="tag-pedido" title="${escapeHtml(tip)}">${TAG_PEDIDO_IDENTIFICADO}</span>`;
+}
+function fechamentoTagHtml(l){
+  if(l && l.fechamentoAuto==="perdido") return `<span class="tag-auto perdido" title="Movido no fechamento do mês, sem ação do vendedor">Perdido automático</span>`;
+  if(l && l.fechamentoAuto==="ganho") return `<span class="tag-auto" title="Pedido identificado no Qlik; movido no fechamento do mês, sem ação do vendedor">Ganho automático</span>`;
+  return "";
+}
 function migrateLeadStatusKey(lead){
   if(lead && STATUS_KEY_MIGRATION[lead.status]) lead.status = STATUS_KEY_MIGRATION[lead.status];
   return lead;
@@ -1670,6 +1708,8 @@ const SHORTCUTS = [
   {key:"quente", label:"Leads quentes", dot:"var(--bad)", test:(l)=> temperature(l)==="quente"},
   {key:"morno", label:"Leads mornos", dot:"var(--warn)", test:(l)=> temperature(l)==="morno"},
   {key:"frio", label:"Leads frios", dot:"var(--accent)", test:(l)=> temperature(l)==="frio"},
+  {key:"pedido_identificado", label:"Pedido identificado (mover p/ Ganho)", dot:"var(--good)", test:(l)=> hasPedidoTag(l)},
+  {key:"perdido_auto", label:"Perdido automático", dot:"var(--bad)", test:(l)=> l.fechamentoAuto==="perdido"},
   {key:"recup_pedido", label:"Recuperado com pedido", dot:"var(--good)", test:(l)=> norm(l.statusErp||"")===STATUS_ERP_RECUPERADO_PEDIDO},
   {key:"recup_faturamento", label:"Recuperado com faturamento", dot:"var(--good)", test:(l)=> norm(l.statusErp||"")===STATUS_ERP_RECUPERADO_FATURAMENTO}
 ];
@@ -2375,6 +2415,9 @@ async function renderDashboard(){
       <div class="k-value num">${ofensorTotal}</div>
       ${hbarListHtml(ofensorRows.slice(0,4), {total:ofensorTotal})}
     </div>
+    ${kpiTile("Pedido identificado", list.filter(hasPedidoTag).length, "Com pedido no Qlik e ainda fora de Ganho — mover para Ganho")}
+    ${kpiTile("Perdido automático", list.filter(l=>l.fechamentoAuto==="perdido").length, "Movidos no fechamento do mês sem ação do vendedor")}
+    ${kpiTile("Ganho automático", list.filter(l=>l.fechamentoAuto==="ganho").length, "Pedido identificado e não movido pelo vendedor até o fechamento")}
     ${kpiTile("Frios", tempCounts.frio, `${pct(tempCounts.frio,total)}% dos leads do período`)}
     ${kpiTile("Mornos", tempCounts.morno, `${pct(tempCounts.morno,total)}% dos leads do período`)}
     ${kpiTile("Quentes", tempCounts.quente, `${pct(tempCounts.quente,total)}% dos leads do período`)}
@@ -3167,6 +3210,7 @@ function renderCard(l){
       <span>${fmtMoney(l.valorPedido)}</span>
       ${daysLabel}
     </div>
+    ${(hasPedidoTag(l) || l.fechamentoAuto) ? `<div class="card-meta">${pedidoTagHtml(l)}${fechamentoTagHtml(l)}</div>` : ""}
     <div class="card-foot">
       <span>${escapeHtml(l.vendedor || l.time || "Sem responsável")}</span>
       ${isStale(l) ? '<span class="stale">Sem atualização 7d+</span>' : `<span>${fmtDate(l.dtInat)}</span>`}
@@ -3197,6 +3241,7 @@ function attachDnD(body, col){
 
 /* ============================= PERSIST SINGLE LEAD ============================= */
 async function persistLead(lead){
+  if(isMonthFrozen()){ toast(frozenMsg(), "err"); return; }
   try{
     const meta = state.meta;
     if(!meta) return;
@@ -3313,6 +3358,7 @@ async function collectOfensorDetail(root, ofensorValue, prevDetail, prefix){
 /* ============================= STAGE CHANGE (guarded) ============================= */
 function requestStageChange(lead, newStage){
   if(!lead || lead.stage===newStage) return;
+  if(isMonthFrozen()){ toast(frozenMsg(), "err"); return; }
   if(lead.stage==="inativo" && newStage==="inativam"){
     toast('Não é possível voltar um cliente de "Inativado" para "Inativam no mês".', "err");
     return;
@@ -3489,10 +3535,13 @@ function openLeadModal(cod){
         <div>
           <h2>${escapeHtml(lead.cli||"—")}</h2>
           <div class="sub">Cód ${escapeHtml(lead.cod)} · ${escapeHtml(lead.cid||"—")}/${escapeHtml(lead.uf||"—")} · ${escapeHtml(lead.seg||"—")}</div>
+          ${(hasPedidoTag(lead) || lead.fechamentoAuto) ? `<div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">${pedidoTagHtml(lead)}${fechamentoTagHtml(lead)}</div>` : ""}
         </div>
         <button class="modal-close" id="closeLead">✕</button>
       </div>
       <div class="modal-body">
+        ${isMonthFrozen() ? `<div class="frozen-banner">🔒 ${escapeHtml(frozenMsg())}</div>` : ""}
+        ${lead.pedidoIdentificado ? `<div class="frozen-banner" style="background:var(--good-soft, var(--surface-3));">Pedido identificado no Qlik: ${escapeHtml((lead.pedidoIdentificado.pedidos||[]).join(", "))} · ${fmtMoney(lead.pedidoIdentificado.valor)}${lead.pedidoIdentificado.dtPrimeiro?" · emitido em "+fmtDate(lead.pedidoIdentificado.dtPrimeiro):""}</div>` : ""}
         <div class="section-title">Referência (base ERP)</div>
         <div class="grid2">
           <div class="kv"><span class="k">Data inativação</span><span class="v">${fmtDate(lead.dtInat)} ${d!=null?`(${d>=0?d+"d restantes":"há "+Math.abs(d)+"d"})`:""}</span></div>
@@ -3500,9 +3549,9 @@ function openLeadModal(cod){
           <div class="kv"><span class="k">Data último faturamento</span><span class="v">${fmtDate(lead.dtUltFat)}</span></div>
           <div class="kv"><span class="k">Faturamento na base (linha de corte)</span><span class="v">${fmtDate(lead.baselineUltFat)}</span></div>
           <div class="kv">
-            <span class="k">Valor de pedido</span>
+            <span class="k">Valor de pedido (R$) <span style="font-weight:400; text-transform:none;">${lead.valorPedidoManual ? "· editado pelo vendedor" : (lead.pedidoIdentificado ? "· do pedido identificado" : "· editável")}</span></span>
             <span class="v" style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-              ${fmtMoney(lead.valorPedido)}
+              <input class="form-input" type="number" step="0.01" min="0" id="fValorPedido" value="${lead.valorPedido!=null ? lead.valorPedido : ""}" style="max-width:180px;">
               ${isImplausibleValorPedido(lead.valorPedido) ? `<span title="Valor muito acima do esperado — a planilha de origem trazia dígitos a mais nesse campo." style="color:var(--bad); font-weight:700; font-size:11px; cursor:default;">⚠ valor suspeito</span>` : ""}
             </span>
           </div>
@@ -3517,7 +3566,7 @@ function openLeadModal(cod){
         <div class="stage-row" id="stageRow">
           ${STAGES.map(s=>{
             const isCurrent = lead.stage===s.key;
-            const blocked = lead.stage==="inativo" && s.key==="inativam";
+            const blocked = (lead.stage==="inativo" && s.key==="inativam") || isMonthFrozen();
             const disabled = isCurrent || blocked;
             return `<button type="button" class="stage-pill ${isCurrent?'on':''}" data-stage="${s.key}" ${disabled?"disabled":""} ${blocked?'title="Não é possível voltar de \'Inativado\' para \'Inativam no mês\'"':""} style="${blocked?'opacity:.4; cursor:not-allowed;':''}">${s.label}</button>`;
           }).join("")}
@@ -3587,7 +3636,7 @@ function openLeadModal(cod){
       <div class="modal-foot">
         <span class="save-indicator" id="saveIndicator"></span>
         <button class="btn btn-subtle" id="cancelLead">Fechar</button>
-        <button class="btn btn-primary" id="saveLead">Salvar alterações</button>
+        <button class="btn btn-primary" id="saveLead" ${isMonthFrozen()?"disabled":""}>Salvar alterações</button>
       </div>
     </div>
   </div>`;
@@ -3617,6 +3666,7 @@ function openLeadModal(cod){
     if(fSemWhatsapp.checked) inp.value = "";
   });
   document.getElementById("saveLead").onclick = async ()=>{
+    if(isMonthFrozen()){ toast(frozenMsg(), "err"); return; }
     const newStatus = document.getElementById("fStatus").value;
     const changed = [];
     if(newStatus!==lead.status) changed.push("status → "+STATUS_LABEL[newStatus]);
@@ -3645,6 +3695,13 @@ function openLeadModal(cod){
     lead.whatsappIndisponivel = fSemWhatsapp.checked;
     lead.whatsapp = fSemWhatsapp.checked ? null : (document.getElementById("fWhatsapp").value.trim() || null);
     lead.valorProposta = Number(document.getElementById("fValorProposta").value) || null;
+    const vpRaw = document.getElementById("fValorPedido").value;
+    const novoValorPedido = vpRaw==="" ? 0 : Number(vpRaw);
+    if(!isNaN(novoValorPedido) && novoValorPedido !== (Number(lead.valorPedido)||0)){
+      changed.push("valor do pedido → "+fmtMoney(novoValorPedido));
+      lead.valorPedido = novoValorPedido;
+      lead.valorPedidoManual = true; // a sincronização não troca mais esse valor
+    }
     lead.linhasPositivadas = Array.from(root.querySelectorAll(".f_linhas:checked")).map(el=>el.value);
     lead.notes = document.getElementById("fNotes").value;
     lead.lastTouched = nowISO();
@@ -3732,6 +3789,7 @@ function openContactPopup(cod){
     if(cpSemWhatsapp.checked) inp.value = "";
   });
   document.getElementById("cpSave").onclick = async ()=>{
+    if(isMonthFrozen()){ toast(frozenMsg(), "err"); return; }
     lead.tel = document.getElementById("cpTel").value.trim() || null;
     lead.whatsappIndisponivel = cpSemWhatsapp.checked;
     lead.whatsapp = cpSemWhatsapp.checked ? null : (document.getElementById("cpWhatsapp").value.trim() || null);
@@ -4006,6 +4064,7 @@ function renderImportSummary(file, byMonth, summary){
 const CHUNK_SIZE = 140;
 async function commitMonthImport(monthKey, incomingRows, onProgress){
   let {meta, leads} = await ensureMonthLoaded(monthKey);
+  if(meta && meta.fechado){ toast(`Mês ${fmtMonthKey(monthKey)} fechado e congelado — importação ignorada para esse mês.`, "err"); onProgress(incomingRows.length); return; }
   const byCod = {};
   leads.forEach(l=>{ byCod[l.cod] = l; });
   if(!meta){
@@ -4094,6 +4153,9 @@ function leadExportRow(l){
     "Mês (base)": fmtMonthKey(l.monthKey), "Cliente": l.cli, "Cód Cliente (BP)": l.cod, "CNPJ": l.cnpj, "UF": l.uf, "Cidade": l.cid, "Segmento": l.seg,
     "Status Atual (ERP)": l.statusErp, "Data Último Faturamento": fmtDate(l.dtUltFat), "Data Inativação": fmtDate(l.dtInat),
     "Valor de pedido": l.valorPedido, "Estágio pipeline": (STAGES.find(s=>s.key===l.stage)||{}).label,
+    "Pedido identificado (Qlik)": l.pedidoIdentificado ? (l.pedidoIdentificado.pedidos||[]).join(", ") : "",
+    "Valor pedido identificado": l.pedidoIdentificado ? l.pedidoIdentificado.valor : null,
+    "Movido no fechamento do mês": l.fechamentoAuto==="perdido" ? "Perdido automático (sem ação do vendedor)" : (l.fechamentoAuto==="ganho" ? "Ganho automático (pedido identificado)" : ""),
     "Status pipeline": STATUS_LABEL[l.status], "Ação": l.acao, "Time": l.time, "Vendedor": l.vendedor, "Ofensor": l.ofensor,
     "Data último contato": fmtDate(l.dtUltimoContato), "Data próximo contato": fmtDate(l.dtProximoContato), "Horário próximo contato": l.horaProximoContato,
     "Contato decisor": l.contatoDecisor, "WhatsApp": l.whatsappIndisponivel ? "Não possui" : l.whatsapp,
@@ -4345,7 +4407,7 @@ async function setMonth(monthKey){
 // lead para qualquer outro estágio, esta regra nunca se aplica (o progresso
 // manual nunca é sobrescrito).
 async function applyAutoInativoTransitions(){
-  if(!state.meta || !state.leads.length) return;
+  if(!state.meta || !state.leads.length || isMonthFrozen()) return;
   const touchedChunks = new Set();
   let anyChange = false;
   state.leads.forEach(l=>{
@@ -4393,6 +4455,7 @@ function autoFixValorPedido(value){
   return (fixed > 0 && fixed <= VALOR_PEDIDO_AUTOFIX_CEILING) ? fixed : null;
 }
 async function applyAutoValorPedidoFix(){
+  if(isMonthFrozen()) return;
   if(!state.meta || !state.leads.length) return;
   const touchedChunks = new Set();
   let anyChange = false;

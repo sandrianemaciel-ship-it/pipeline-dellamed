@@ -90,6 +90,9 @@ async function commitMonth(db, monthKey, incomingRows, sourceLabel){
   return db.runTransaction(async (tx) => {
     const metaSnap = await tx.get(monthRef);
     const meta = metaSnap.exists ? metaSnap.data() : null;
+    if(meta && meta.fechado){
+      return { monthKey, novos: 0, atualizados: 0, semMudanca: 0, total: incomingRows.length, congelado: true };
+    }
     const chunkCount = meta ? meta.chunkCount || 0 : 0;
     const chunks = [];
     if(chunkCount){
@@ -198,6 +201,7 @@ async function cleanupMonth(db, monthKey, freshByCod, { dryRun = false } = {}){
     const metaSnap = await tx.get(monthRef);
     if(!metaSnap.exists) return { monthKey, removidos: [], revisar: [] };
     const meta = metaSnap.data();
+    if(meta.fechado) return { monthKey, removidos: [], revisar: [], congelado: true };
     const chunkCount = meta.chunkCount || 0;
     const refs = Array.from({ length: chunkCount }, (_, i) => monthRef.collection("chunks").doc("c" + i));
     const snaps = chunkCount ? await tx.getAll(...refs) : [];
@@ -218,4 +222,138 @@ async function cleanupMonth(db, monthKey, freshByCod, { dryRun = false } = {}){
   });
 }
 
-module.exports = { groupByMonth, mergeMonth, commitMonth, cleanMonth, cleanupMonth, CHUNK_SIZE };
+// ---------------------------------------------------------------------------
+// Pedidos identificados no Qlik e fechamento do mês.
+//
+// Pedido identificado: o BP do cliente tem pedido na pasta Pedidos do Qlik
+// emitido dentro do mês da pipeline (VL_TOTAL > 0, já descontados os
+// cancelamentos). O cliente recebe a tag "PEDIDO IDENTIFICADO, MOVA PARA
+// GANHO" (lead.pedidoIdentificado) e o Valor de pedido passa a ser o total dos
+// pedidos, a menos que o vendedor tenha digitado outro valor.
+//
+// Fechamento (dia 01 do mês seguinte): quem tem pedido identificado e não foi
+// movido vai para Ganho; quem não está em Ganho nem em Negociação Perdida vai
+// para Negociação Perdida. Os dois ficam marcados em lead.fechamentoAuto
+// (indicador de "movido sem ação do vendedor"). Depois disso o mês fica
+// congelado (meta.fechado) e nada mais é gravado nele.
+
+const TAG_PEDIDO_IDENTIFICADO = "PEDIDO IDENTIFICADO, MOVA PARA GANHO";
+const normCod = (c) => String(c == null ? "" : c).trim().replace(/^0+(?=\d)/, "");
+const fmtBRL = (v) => "R$ " + Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtBR = (iso) => iso ? iso.split("-").reverse().join("/") : "—";
+
+// pedidos: [{cod, pedido, valor, data}] -> { codNormalizado: [pedidos...] }
+function indexPedidos(pedidos){
+  const by = {};
+  for(const p of pedidos){ (by[normCod(p.cod)] = by[normCod(p.cod)] || []).push(p); }
+  return by;
+}
+
+function pedidoInfo(lista, monthKey){
+  const doMes = (lista || []).filter(p => p.valor > 0 && p.data && p.data.slice(0, 7) === monthKey);
+  if(!doMes.length) return null;
+  return {
+    pedidos: [...new Set(doMes.map(p => p.pedido))].sort(),
+    valor: Math.round(doMes.reduce((s, p) => s + p.valor, 0) * 100) / 100,
+    dtPrimeiro: doMes.map(p => p.data).sort()[0]
+  };
+}
+
+// Lógica pura: marca/atualiza/remove pedidoIdentificado nos leads do mês.
+function applyPedidosMonth(monthKey, chunks, pedidosByCod){
+  const touched = new Set();
+  let identificados = 0, novos = 0, removidos = 0;
+  chunks.forEach((c, ci) => (c.leads || []).forEach(l => {
+    const info = pedidoInfo(pedidosByCod[normCod(l.cod)], monthKey);
+    const old = l.pedidoIdentificado || null;
+    if(info) identificados++;
+    const igual = old && info && old.valor === info.valor && old.dtPrimeiro === info.dtPrimeiro
+      && JSON.stringify(old.pedidos) === JSON.stringify(info.pedidos);
+    if(igual || (!old && !info)) return;
+    if(info){
+      l.pedidoIdentificado = { ...info, em: old && old.em || L.nowISO() };
+      if(!l.valorPedidoManual) l.valorPedido = info.valor;
+      if(!old){
+        novos++;
+        L.pushHist(l, `${TAG_PEDIDO_IDENTIFICADO}: pedido(s) ${info.pedidos.join(", ")} emitido(s) a partir de ${fmtBR(info.dtPrimeiro)} — ${fmtBRL(info.valor)} (Qlik).`);
+      }
+    }else{
+      l.pedidoIdentificado = null;
+      removidos++;
+      L.pushHist(l, "Pedido não consta mais no Qlik neste mês (cancelado?) — tag de pedido identificado removida.");
+    }
+    l.dataUpdatedAt = L.nowISO();
+    touched.add(ci);
+  }));
+  return { touched, identificados, novos, removidos };
+}
+
+const STAGE_LABEL = { inativam: "Inativam no mês", inativo: "Inativado", contato: "Contato feito",
+  proposta: "Proposta enviada", negociando: "Negociando", ganho: "Ganho", perdido: "Negociação Perdida" };
+
+// Lógica pura: fecha o mês.
+function closeMonthLogic(monthKey, meta, chunks){
+  const now = L.nowISO();
+  const touched = new Set();
+  let ganhoAuto = 0, perdidoAuto = 0;
+  chunks.forEach((c, ci) => (c.leads || []).forEach(l => {
+    if(l.stage === "ganho" || l.stage === "perdido") return;
+    const de = STAGE_LABEL[l.stage] || l.stage;
+    if(l.pedidoIdentificado){
+      l.stage = "ganho"; l.status = "ganho"; l.fechamentoAuto = "ganho"; ganhoAuto++;
+      L.pushHist(l, `Movido automaticamente de "${de}" para "Ganho" no fechamento do mês — pedido identificado no Qlik e não movido pelo vendedor (sem ação do vendedor).`);
+    }else{
+      l.stage = "perdido"; l.status = "perdido"; l.fechamentoAuto = "perdido"; perdidoAuto++;
+      L.pushHist(l, `Movido automaticamente de "${de}" para "Negociação Perdida" no fechamento do mês — sem pedido e sem ação do vendedor.`);
+    }
+    l.fechamentoAutoEm = now;
+    l.dataUpdatedAt = now;
+    touched.add(ci);
+  }));
+  meta = { ...meta, fechado: true, fechadoEm: now, fechamento: { ganhoAuto, perdidoAuto, em: now } };
+  return { meta, chunks, touched, ganhoAuto, perdidoAuto };
+}
+
+async function loadMonthTx(tx, monthRef){
+  const metaSnap = await tx.get(monthRef);
+  if(!metaSnap.exists) return null;
+  const meta = metaSnap.data();
+  const refs = Array.from({ length: meta.chunkCount || 0 }, (_, i) => monthRef.collection("chunks").doc("c" + i));
+  const snaps = refs.length ? await tx.getAll(...refs) : [];
+  const chunks = snaps.map(s => s.exists ? { ...s.data(), leads: s.data().leads || [] } : { leads: [] });
+  return { meta, refs, chunks };
+}
+
+async function commitPedidosMonth(db, monthKey, pedidosByCod, { dryRun = false } = {}){
+  const monthRef = db.doc("months/" + monthKey);
+  return db.runTransaction(async (tx) => {
+    const m = await loadMonthTx(tx, monthRef);
+    if(!m) return { monthKey, identificados: 0, novos: 0, removidos: 0 };
+    if(m.meta.fechado) return { monthKey, identificados: 0, novos: 0, removidos: 0, congelado: true };
+    const r = applyPedidosMonth(monthKey, m.chunks, pedidosByCod);
+    if(!dryRun) for(const ci of r.touched) tx.set(m.refs[ci], m.chunks[ci]);
+    return { monthKey, identificados: r.identificados, novos: r.novos, removidos: r.removidos };
+  });
+}
+
+// pedidosByCod (opcional): aplica os pedidos mais recentes antes de fechar.
+async function closeMonth(db, monthKey, { dryRun = false, pedidosByCod = null } = {}){
+  const monthRef = db.doc("months/" + monthKey);
+  return db.runTransaction(async (tx) => {
+    const m = await loadMonthTx(tx, monthRef);
+    if(!m || m.meta.fechado) return { monthKey, jaFechado: !!m };
+    if(pedidosByCod) applyPedidosMonth(monthKey, m.chunks, pedidosByCod);
+    const r = closeMonthLogic(monthKey, m.meta, m.chunks);
+    r.chunks.forEach((_, ci) => r.touched.add(ci));
+    if(!dryRun){
+      for(const ci of r.touched) tx.set(m.refs[ci], r.chunks[ci]);
+      tx.set(monthRef, r.meta);
+    }
+    return { monthKey, ganhoAuto: r.ganhoAuto, perdidoAuto: r.perdidoAuto };
+  });
+}
+
+module.exports = {
+  groupByMonth, mergeMonth, commitMonth, cleanMonth, cleanupMonth, CHUNK_SIZE,
+  indexPedidos, applyPedidosMonth, closeMonthLogic, commitPedidosMonth, closeMonth, TAG_PEDIDO_IDENTIFICADO
+};
