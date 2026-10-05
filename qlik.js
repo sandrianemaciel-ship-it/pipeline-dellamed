@@ -79,6 +79,11 @@ async function readAllPages(obj, layout){
 
 // Retorna { headers: [..], rows: [[{text,num}|null, ...], ...] }
 async function fetchTable(cfg, log = console.log){
+  return withApp(cfg, (app) => readClientTable(app, cfg, log));
+}
+
+// Abre o app numa sessão isolada e sem seleções, roda fn(app) e fecha.
+async function withApp(cfg, fn){
   // Guarda o motivo real quando o Qlik recusa/fecha a conexão, para o log
   // não mostrar só "Socket closed".
   const diag = { http: null, code: null, reason: "" };
@@ -97,6 +102,22 @@ async function fetchTable(cfg, log = console.log){
     const app = await global.openDoc(cfg.appId); // abre o app com os dados carregados
     // Lê a base inteira: limpa as seleções (só desta sessão isolada).
     await app.clearAll(true);
+    return await fn(app);
+  }catch(err){
+    // Erros de conexão (chave recusada, sem acesso ao app etc.) viram uma
+    // mensagem clara; demais erros (ex.: objeto inexistente) seguem como estão.
+    const m = /Unexpected server response: (\d+)/.exec(err && err.message || "");
+    if(m) diag.http = Number(m[1]);
+    if(diag.http || diag.code || /socket|ECONN|ENOTFOUND|ETIMEDOUT/i.test(err && err.message || "")){
+      throw new Error(explainSocketError(err, diag, url));
+    }
+    throw err;
+  }finally{
+    try{ await session.close(); }catch(e){ /* ignora */ }
+  }
+}
+
+async function readClientTable(app, cfg, log){
     let obj, headers;
     if(cfg.objectId){
       // Opção 1: ler uma tabela já existente no app (ID do objeto).
@@ -138,18 +159,50 @@ async function fetchTable(cfg, log = console.log){
     log(`Qlik: tabela montada com ${layout.qHyperCube.qSize.qcy} linhas x ${fields.length} campos.`);
     const rows = await readAllPages(obj, layout);
     return { headers, rows };
-  }catch(err){
-    // Erros de conexão (chave recusada, sem acesso ao app etc.) viram uma
-    // mensagem clara; demais erros (ex.: objeto inexistente) seguem como estão.
-    const m = /Unexpected server response: (\d+)/.exec(err && err.message || "");
-    if(m) diag.http = Number(m[1]);
-    if(diag.http || diag.code || /socket|ECONN|ENOTFOUND|ETIMEDOUT/i.test(err && err.message || "")){
-      throw new Error(explainSocketError(err, diag, url));
+}
+
+// Reconhecimento (só leitura): lista as pastas do app e, na pasta "Pedidos",
+// os objetos com seus campos e fórmulas, além das medidas mestras e dos
+// campos com nome de pedido/cliente/data/valor. Serve para montar a busca
+// de pedidos com os mesmos campos e fórmulas da pasta.
+async function discoverApp(cfg, log = console.log){
+  return withApp(cfg, async (app) => {
+    const props = await app.getAppProperties().catch(() => ({}));
+    log(`Qlik [reconhecimento]: app "${props.qTitle || "?"}" (${cfg.appId})`);
+    const listObj = async (def) => {
+      const o = await app.createSessionObject(def);
+      return o.getLayout();
+    };
+    const sheets = (await listObj({ qInfo: { qType: "SheetList" }, qAppObjectListDef: { qType: "sheet",
+      qData: { title: "/qMetaDef/title", cells: "/cells" } } })).qAppObjectList.qItems;
+    log("Pastas:", sheets.map(sh => sh.qData.title).join(" | "));
+    for(const sh of sheets.filter(x => /pedido/i.test(x.qData.title || ""))){
+      log(`Pasta "${sh.qData.title}" (${sh.qInfo.qId}): ${(sh.qData.cells || []).length} objetos`);
+      for(const c of sh.qData.cells || []){
+        try{
+          const o = await app.getObject(c.name);
+          const p = await o.getProperties();
+          const hc = p.qHyperCubeDef || (p.qListObjectDef ? { qDimensions: [p.qListObjectDef] } : null);
+          const dims = hc ? (hc.qDimensions || []).map(d => (d.qDef && d.qDef.qFieldDefs || []).join("+") + (d.qLibraryId ? `[lib ${d.qLibraryId}]` : "")) : [];
+          const meas = hc ? (hc.qMeasures || []).map(m => `${(m.qDef && m.qDef.qLabel) || ""}=${(m.qDef && m.qDef.qDef) || ""}${m.qLibraryId ? `[lib ${m.qLibraryId}]` : ""}`) : [];
+          const title = (p.title && (p.title.qStringExpression ? p.title.qStringExpression.qExpr : p.title)) || "";
+          log(`  - ${c.type} ${c.name} "${typeof title === "string" ? title : JSON.stringify(title)}" dims=[${dims.join(" | ")}] medidas=[${meas.join(" | ")}]`);
+          if(p.qChildListDef || c.type === "filterpane"){
+            const lay = await o.getLayout();
+            const kids = (lay.qChildList && lay.qChildList.qItems || []).map(k => (k.qData && k.qData.title) || k.qInfo.qId);
+            if(kids.length) log(`      filtros: ${kids.join(" | ")}`);
+          }
+        }catch(e){ log(`  - ${c.type} ${c.name}: erro ${e.message}`); }
+      }
     }
-    throw err;
-  }finally{
-    try{ await session.close(); }catch(e){ /* ignora */ }
-  }
+    const measures = (await listObj({ qInfo: { qType: "MeasureList" }, qMeasureListDef: { qType: "measure",
+      qData: { title: "/qMetaDef/title", expr: "/qMeasure/qDef" } } })).qMeasureList.qItems;
+    log(`Medidas mestras (${measures.length}):`);
+    measures.filter(m => /pedido|fatur|valor|canc/i.test(m.qData.title || "")).forEach(m => log(`  - ${m.qInfo.qId} "${m.qData.title}" = ${m.qData.expr}`));
+    const fields = (await listObj({ qInfo: { qType: "FieldList" }, qFieldListDef: { qShowSystem: false } })).qFieldList.qItems;
+    const rel = fields.filter(f => /pedido|cliente|bp|emiss|cancel|valor|situa|data|nf|ov|fatur/i.test(f.qName));
+    log(`Campos (${fields.length} no total; ${rel.length} relacionados): ${rel.map(f => f.qName).join(" | ")}`);
+  });
 }
 
 function explainSocketError(err, d, url){
@@ -168,4 +221,4 @@ function explainSocketError(err, d, url){
   return parts.join(" ");
 }
 
-module.exports = { fetchTable, buildSocketUrl, cellValue, readAllPages, orderedHeaders };
+module.exports = { fetchTable, withApp, discoverApp, buildSocketUrl, cellValue, readAllPages, orderedHeaders };

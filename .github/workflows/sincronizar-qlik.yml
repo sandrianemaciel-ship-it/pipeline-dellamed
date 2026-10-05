@@ -17,6 +17,10 @@ on:
         description: "Só simular: mostra no log o que faria, sem gravar nada"
         type: boolean
         default: false
+      reconhecer:
+        description: "Só reconhecimento do Qlik (pastas, campos e fórmulas); não grava nada"
+        type: boolean
+        default: false
 
 concurrency:
   group: sincronizar-qlik
@@ -34,7 +38,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Sincronizar
-        run: node index.js --once ${{ inputs.limpar && '--limpar' || '' }} ${{ inputs.simular && '--dry-run' || '' }}
+        run: node index.js --once ${{ inputs.limpar && '--limpar' || '' }} ${{ inputs.simular && '--dry-run' || '' }} ${{ inputs.reconhecer && '--reconhecer' || '' }}
         env:
           QLIK_HOST: ${{ secrets.QLIK_HOST }}
           QLIK_APP_ID: ${{ secrets.QLIK_APP_ID }}
@@ -44,4 +48,5 @@ jobs:
           QLIK_JWT: ${{ secrets.QLIK_JWT }}
           QLIK_REJECT_UNAUTHORIZED: ${{ vars.QLIK_REJECT_UNAUTHORIZED || 'true' }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          QLIK_PEDIDOS_APP_ID: ${{ vars.QLIK_PEDIDOS_APP_ID || 'c4afa8c1-1f3b-4444-b9f8-9f4d82e516e1' }}
           SYNC_FROM_MONTH: ${{ vars.SYNC_FROM_MONTH || '2026-09' }}

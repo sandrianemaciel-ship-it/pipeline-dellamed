@@ -11,13 +11,14 @@ const fs = require("fs");
 const path = require("path");
 const cron = require("node-cron");
 const admin = require("firebase-admin");
-const { fetchTable } = require("./qlik");
+const { fetchTable, discoverApp } = require("./qlik");
 const { mapRows } = require("./mapping");
 const { groupByMonth, commitMonth, cleanupMonth } = require("./firestoreSync");
 
 const args = new Set(process.argv.slice(2));
 const DRY = args.has("--dry-run");
 const ONCE = args.has("--once") || DRY;
+const RECONHECER = args.has("--reconhecer");
 const LIMPAR = args.has("--limpar") || process.env.LIMPAR_COLUNAS_TROCADAS === "true";
 
 function log(...a){ console.log(new Date().toLocaleString("pt-BR"), "-", ...a); }
@@ -160,6 +161,15 @@ async function limparColunasTrocadas(cfg, records){
 
 async function main(){
   const cfg = loadConfig();
+  if(RECONHECER){
+    // Só leitura: mostra pastas, objetos, fórmulas e campos dos apps.
+    const ids = [...new Set([cfg.qlik.appId, process.env.QLIK_PEDIDOS_APP_ID].filter(Boolean))];
+    for(const appId of ids){
+      try{ await discoverApp({ ...cfg.qlik, appId }, log); }
+      catch(e){ log(`Reconhecimento do app ${appId} falhou: ${e.message}`); }
+    }
+    return;
+  }
   if(!DRY || LIMPAR) initFirestore(cfg);
   if(ONCE){ await runSync(cfg, DRY ? "simulação" : "manual"); return; }
 
