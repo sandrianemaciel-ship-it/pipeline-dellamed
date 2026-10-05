@@ -11,8 +11,11 @@ const schema = require("enigma.js/schemas/12.2027.0.json");
 
 const PAGE_CELLS = 10000; // limite de células por página do Engine
 
+// "identity" abre uma sessão só do serviço. Sem ela, o Engine reaproveita a
+// sessão do usuário dono da chave e a tabela vem filtrada pelas seleções que
+// ele estiver fazendo no Qlik naquele momento.
 function buildSocketUrl(cfg){
-  const appPath = "app/" + encodeURIComponent(cfg.appId);
+  const appPath = "app/" + encodeURIComponent(cfg.appId) + "/identity/" + encodeURIComponent(cfg.identity || "pipeline-sync");
   if(cfg.authMode === "cert"){
     return `wss://${cfg.host}:${cfg.enginePort || 4747}/${appPath}`;
   }
@@ -92,6 +95,8 @@ async function fetchTable(cfg, log = console.log){
   try{
     const global = await session.open();
     const app = await global.openDoc(cfg.appId); // abre o app com os dados carregados
+    // Lê a base inteira: limpa as seleções (só desta sessão isolada).
+    await app.clearAll(true);
     let obj, headers;
     if(cfg.objectId){
       // Opção 1: ler uma tabela já existente no app (ID do objeto).
