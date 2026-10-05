@@ -4395,14 +4395,29 @@ async function loadMonths(){
   state.months = await Store.listMonths();
 }
 async function setMonth(monthKey){
+  // Nunca mostra os clientes de um mês com outro mês no filtro: enquanto o mês
+  // escolhido carrega, a tela fica vazia; se a leitura falhar, avisa. Se a
+  // pessoa trocar de mês de novo antes de terminar, vale só a última escolha.
+  const req = state._monthReq = (state._monthReq||0) + 1;
   state.monthKey = monthKey;
   state.loading = true;
+  state.meta = null;
+  state.leads = [];
   renderAll();
-  const {meta, leads} = await ensureMonthLoaded(monthKey);
-  state.meta = meta;
-  state.leads = leads;
-  await applyAutoInativoTransitions();
-  await applyAutoValorPedidoFix();
+  try{
+    const {meta, leads} = await ensureMonthLoaded(monthKey);
+    if(req !== state._monthReq) return;
+    state.meta = meta;
+    state.leads = leads;
+    await applyAutoInativoTransitions();
+    await applyAutoValorPedidoFix();
+  }catch(err){
+    console.error(err);
+    if(req !== state._monthReq) return;
+    if(state._monthCache) delete state._monthCache[monthKey];
+    toast(`Não foi possível carregar ${fmtMonthKey(monthKey)} agora (${(err && err.message) || err}). Recarregue a página e tente de novo.`, "err");
+  }
+  if(req !== state._monthReq) return;
   state.loading = false;
   Object.values(state.filters).forEach(s=>s.clear());
   state.shortcut = null;
@@ -4827,7 +4842,12 @@ function renderDbSyncBanner(){
 async function boot(){
   renderDbSyncBanner();
   await loadMonths();
-  await setMonth(TRACKING_START);
+  // Abre no mês vigente (ou no último mês gravado antes dele).
+  const hoje = new Date();
+  const mesVigente = hoje.getFullYear()+"-"+String(hoje.getMonth()+1).padStart(2,"0");
+  const gravados = state.months.map(m=>m && m.monthKey).filter(Boolean).sort();
+  const mesInicial = gravados.includes(mesVigente) ? mesVigente : (gravados.filter(k=>k<=mesVigente).pop() || TRACKING_START);
+  await setMonth(mesInicial);
   if(typeof Notification!=="undefined" && Notification.permission==="default"){
     // Pede permissão de forma discreta, sem travar o carregamento inicial.
     setTimeout(()=>{ toast('Ative os lembretes de ligação em "Gestão de Contatos" para receber avisos mesmo fora da aba.', "info"); }, 1500);
