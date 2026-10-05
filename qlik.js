@@ -171,7 +171,9 @@ function isoToSerial(iso){
 }
 async function fetchPedidos(cfg, fromISO, toISO, log = console.log){
   const ini = isoToSerial(fromISO), fim = isoToSerial(toISO) + 1; // fim exclusivo (datas com hora)
-  const set = `{<DATA_EMISSAO={">=${ini}<${fim}"}>}`;
+  // A busca no campo de data precisa do texto da data (Date(n)); com o número
+  // puro o Qlik não encontra nada.
+  const set = `{<DATA_EMISSAO={">=$(=Date(${ini}))<$(=Date(${fim}))"}>}`;
   return withApp(cfg, async (app) => {
     const obj = await app.createSessionObject({
       qInfo: { qType: "pipeline-pedidos" },
