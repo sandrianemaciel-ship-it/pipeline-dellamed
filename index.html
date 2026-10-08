@@ -681,10 +681,10 @@
 const ACAO_OPTIONS = ["Promoção","Bonificação","Prazo","Outros"];
 const TIME_VENDEDOR_OPTIONS = [
   "Supervisor Yghor - Boinas Azuis","Gerente Tamires - Licitações","Instituições - Representante",
-  "Líder de Vendas Leonardo","Líder de Vendas Sandro","Líder de Vendas Jessica","Supervisor - Marvin",
+  "Líder de Vendas Leonardo","Equipe Lobão","Líder de Vendas Jessica","Supervisor - Marvin",
   "Líder de Vendas Sandriane","Líder de Vendas Fabio","Líder de Novos Canais - Patrícia",
   "Líder de Vendas Luisa Tiscoski Abreu","Lider de Vendas - Raphael","Líder de Vendas Marco - Inativos",
-  "Supervisor Fasoli - Turbon 3P","Líder de Vendas Sandro - Inativos","Lider de Vendas - Raphael - Inativos",
+  "Supervisor Fasoli - Turbon 3P","Equipe Lobão - Inativos","Lider de Vendas - Raphael - Inativos",
   "Key Account - Turbon 1P"
 ];
 const SEGMENTO_OPTIONS = [
@@ -739,8 +739,8 @@ const TEAM_MAP = {
   "Gerente Tamires - Licitações": ["CHEILA DOS SANTOS","FERNANDA WALESCA GARCIA"],
   "Instituições - Representante": ["GBE REPRESENTACAO DE PRODUTOS PARA SAUDELTDA"],
   "Líder de Vendas Leonardo": ["MARSEILLY ALVES FERREIRA","RILARI ANTONIA DA SILVA MARTINS","LEONARDO DE VARGAS DALPUBEL","ARTUR QUADRI GETTERT"],
-  "Líder de Vendas Sandro": ["IURI SOARES BOENO","MARIA EDUARDA DE VARGAS WALTER","LUEZER DE VALERIO DELFIM","NICOLE AZEVEDO","SANDRO DANIEL THOMAZONI JUNIOR","TABITA DANIELI BORGES","MAIARA BOSCHETTI","EDUARDA RADATZ DA SILVA"],
-  "Líder de Vendas Jessica": ["LUANA FERREIRA FIGUEREDO","MATHEUS RODRIGUES SOUSA","JESSICA SOARES PORTO","ESTEPHANY VICTORIA CAMARGO LUCEIRO","JULIANA VIEIRA DUARTE DE OLIVEIRA"],
+  "Equipe Lobão": ["IURI SOARES BOENO","MARIA EDUARDA DE VARGAS WALTER","LUEZER DE VALERIO DELFIM","SANDRO DANIEL THOMAZONI JUNIOR","TABITA DANIELI BORGES","MAIARA BOSCHETTI","EDUARDA RADATZ DA SILVA","MATHEUS RODRIGUES SOUSA"],
+  "Líder de Vendas Jessica": ["LUANA FERREIRA FIGUEREDO","NICOLE AZEVEDO","JESSICA SOARES PORTO","ESTEPHANY VICTORIA CAMARGO LUCEIRO","JULIANA VIEIRA DUARTE DE OLIVEIRA"],
   "Supervisor - Marvin": ["RIBEIRO REPRESENTACAO COMERCIAL LTDA","MARVIN DE CAMPOS","MEDICAL CARE REPRESENTACOES LTDA","SJN REPRESENTACAO COMERCIAL LTDA","KAREN ALVES CARDOSOKAS REPRESENTACOES","METAVENDAS SOLUCOES EM VENDAS LTDA","EDMAR CRUZ DA COSTA","M. IZABEL PIRES VIEIRA LTDA","CAN REPRESENTACAO COMERCIAL LTDA","A. DE L. WESEN LTDA -WM REPRESENTACOES","ALARCAO E MEIRELES REPRESENTACOES COMERC","B. B. DOS SANTOS REPRESENTACAO COMERCIAL","BARUCH APOIO ADMINISTRATIVO LTDA","CLEBER GOMES DE SOUZA","ENZ REPRESENTACOES LTDA","FORTPRIME REPRESENTACOES LTDAFORTPRIME","H. MED REPRESENTACOES LTDA","LIMA E REPRESENTACOES LTDA","RECOM REPRESENTACOES E SERVICOS LTDA","T C SOARES DOS SANTOS - I9 REPRESENTACOES","WK SERVICE LTDAWK PHARMA REPRESENTACOES"],
   "Líder de Vendas Sandriane": ["STEFANY DA ROSA BRANDAO SALDANHA","ISADORA KIMBERLY DA COSTA","KELLY VIEIRA DOS SANTOS","HELOISA GARCIA COLLING","ALESSANDRA ALVES DE SOUZA"],
   "Líder de Vendas Fabio": ["MILENA DA SILVA","FABIO JUNIOR RODRIGUES","THAIS DE SOUZA PORTES","NAUANY DE OLVEIRA RODRIGUES DE OLVEIRA RODRIGUES","LUCAS PRESTES DE SOUZA","VITOR DOS SANTOS RAMOS"],
@@ -750,7 +750,7 @@ const TEAM_MAP = {
   "Supervisor Fasoli - Turbon 3P": ["LOUISE DE OLIVEIRA GESTEIRA","FELIPE FASOLI HORN","IMPACTO III REPRESENTACOES LTDA","ROBERTA SUAREZ GOMES"],
   "Key Account - Turbon 1P": ["ROBERTA SUAREZ GOMES"],
   "Líder de Vendas Marco - Inativos": [],
-  "Líder de Vendas Sandro - Inativos": [],
+  "Equipe Lobão - Inativos": [],
   "Lider de Vendas - Raphael - Inativos": []
 };
 const TEAM_MEMBER_LOOKUP = {}; // normalized member name -> team label
@@ -4367,6 +4367,7 @@ async function setMonth(monthKey){
     state.meta = meta;
     state.leads = leads;
     await applyAutoInativoTransitions();
+    await applyTeamReassignments();
     await applyAutoValorPedidoFix();
   }catch(err){
     console.error(err);
@@ -4387,6 +4388,44 @@ async function setMonth(monthKey){
 // automaticamente movido para "Inativo". Se o vendedor já tiver movimentado o
 // lead para qualquer outro estágio, esta regra nunca se aplica (o progresso
 // manual nunca é sobrescrito).
+// Reorganização de equipes: renomeia o time "Líder de Vendas Sandro" para
+// "Equipe Lobão" e move Matheus (-> Lobão) e Nicole (-> Jessica). Os leads já
+// salvos no banco guardam o nome do time antigo, então ajustamos aqui, na
+// abertura do mês (só mexe em quem ainda está com a derivação automática de
+// vendedor/time; escolhas manuais são preservadas).
+const TEAM_RENAMES = {"Líder de Vendas Sandro":"Equipe Lobão","Líder de Vendas Sandro - Inativos":"Equipe Lobão - Inativos"};
+const TEAM_MOVED_VENDEDORES = new Set(["MATHEUS RODRIGUES SOUSA","NICOLE AZEVEDO"].map(n=>norm(n)));
+async function applyTeamReassignments(){
+  if(!state.meta || !state.leads.length || isMonthFrozen()) return;
+  const touchedChunks = new Set();
+  let anyChange = false;
+  state.leads.forEach(l=>{
+    let newTime = l.time;
+    if(TEAM_RENAMES[l.time]) newTime = TEAM_RENAMES[l.time];
+    if(l.vendedorAuto!==false && l.vendedor && TEAM_MOVED_VENDEDORES.has(norm(l.vendedor))){
+      newTime = lookupTeam(l.vendedor) || newTime;
+    }
+    if(newTime!==l.time){
+      l.time = newTime;
+      anyChange = true;
+      const ci = state.meta.codToChunk ? state.meta.codToChunk[l.cod] : null;
+      if(ci!=null) touchedChunks.add(ci);
+    }
+  });
+  if(!anyChange) return;
+  for(const ci of touchedChunks){
+    try{
+      const chunk = await Store.getChunk(state.monthKey, ci);
+      (chunk.leads||[]).forEach((cl, idx)=>{
+        const updated = state.leads.find(l=>l.cod===cl.cod);
+        if(updated) chunk.leads[idx] = updated;
+      });
+      await Store.setChunk(state.monthKey, ci, chunk);
+    }catch(err){ console.error(err); }
+  }
+  if(state._monthCache && state._monthCache[state.monthKey]) state._monthCache[state.monthKey].leads = state.leads;
+}
+
 async function applyAutoInativoTransitions(){
   if(!state.meta || !state.leads.length || isMonthFrozen()) return;
   const touchedChunks = new Set();
