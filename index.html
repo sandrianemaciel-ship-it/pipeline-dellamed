@@ -758,6 +758,26 @@ Object.entries(TEAM_MAP).forEach(([team, members])=>{
   members.forEach(m=>{ const k = norm(m); if(!(k in TEAM_MEMBER_LOOKUP)) TEAM_MEMBER_LOOKUP[k] = team; });
 });
 function lookupTeam(name){ if(!name) return null; return TEAM_MEMBER_LOOKUP[norm(name)] || null; }
+// Contagem de clientes POR GRUPO: códigos de cliente diferentes que têm o
+// mesmo Cód Grupo contam como 1 cliente só. Sem Cód Grupo, o próprio código
+// do cliente é o grupo. Os cartões continuam separados na pipeline (cada
+// código é trabalhado individualmente) — só os números/indicadores somam por
+// grupo. Dentro de um grupo, o representante é o cartão em Ganho (se houver);
+// senão, o primeiro da lista.
+function groupKey(l){
+  const g = l && l.codGrupo != null ? String(l.codGrupo).trim() : "";
+  return g ? "g:"+g : "c:"+(l ? l.cod : "");
+}
+function dedupeByGroup(list){
+  const map = new Map();
+  (list||[]).forEach(l=>{
+    const k = groupKey(l);
+    const cur = map.get(k);
+    if(!cur || (cur.stage!=="ganho" && l.stage==="ganho")) map.set(k, l);
+  });
+  return Array.from(map.values());
+}
+function countClients(list){ return new Set((list||[]).map(groupKey)).size; }
 // Cronograma semanal da equipe (conteúdo do mural "Rotina Vencedora"), usado
 // no ticker do cabeçalho e no painel lateral da Gestão de Contatos. Ícones e
 // cores seguem a identidade visual da Dellamed (--navy/--accent/--good/etc.),
@@ -1548,7 +1568,7 @@ const TAG_PEDIDO_IDENTIFICADO = "PEDIDO IDENTIFICADO, MOVA PARA GANHO";
 function baseBiTexto(){
   const b = state.meta && state.meta.baseBI;
   if(!b) return "";
-  return `Base do BI ${fmtMonthKey(state.meta.monthKey||state.monthKey)}: ${b.total} cliente(s) com data de inativação de ${fmtDate(b.de)} a ${fmtDate(b.ate)} · ${state.leads.length} na pipeline`;
+  return `Base do BI ${fmtMonthKey(state.meta.monthKey||state.monthKey)}: ${b.total} cliente(s) com data de inativação de ${fmtDate(b.de)} a ${fmtDate(b.ate)} · ${countClients(state.leads)} na pipeline`;
 }
 function hasPedidoTag(l){ return !!(l && l.pedidoIdentificado) && l.stage!=="ganho"; }
 function isMonthFrozen(){ return !!(state.meta && state.meta.fechado); }
@@ -2293,7 +2313,7 @@ function dashCardHeader(title, key){
 async function renderDashboard(){
   const wrap = document.getElementById("viewDashboard");
   wrap.innerHTML = `<div class="panel" style="padding:40px; text-align:center; color:var(--ink-faint);"><span class="spinner"></span> Carregando dashboard...</div>`;
-  const list = currentFiltered();
+  const list = dedupeByGroup(currentFiltered()); // 1 cliente por Cód Grupo
   const total = list.length;
 
   const filterParts = activeFilterSummary();
@@ -2344,7 +2364,7 @@ async function renderDashboard(){
      é calculada IGNORANDO o filtro de Status — senão, ao filtrar por
      Status = Ganho, a base viraria só os próprios clientes em Ganho e a
      meta apareceria sempre em 100%, o que não faz sentido. ---- */
-  const impedirBaseLeads = leadsIgnoringStatusFilter();
+  const impedirBaseLeads = dedupeByGroup(leadsIgnoringStatusFilter());
   const impedirTotal = impedirBaseLeads.length;
   const impedirMeta = Math.ceil(impedirTotal*0.7);
   const impedirEstamos = impedirBaseLeads.filter(l=>l.stage==="ganho").length;
@@ -3126,7 +3146,7 @@ function renderBoard(){
     col.dataset.stage = stage.key;
     const totalVal = items.reduce((s,l)=>s+(Number(l.valorPedido)||0),0);
     col.innerHTML = `
-      <div class="col-head"><span class="dot" style="background:${stage.color}"></span><b ${stage.hint?`title="${escapeHtml(stage.hint)}"`:""}>${stage.label}</b><button type="button" class="col-search-btn" data-stage-search="${stage.key}" title="Pesquisar/selecionar em massa por Cód Cliente">🔎</button><span class="count">${items.length}</span></div>
+      <div class="col-head"><span class="dot" style="background:${stage.color}"></span><b ${stage.hint?`title="${escapeHtml(stage.hint)}"`:""}>${stage.label}</b><button type="button" class="col-search-btn" data-stage-search="${stage.key}" title="Pesquisar/selecionar em massa por Cód Cliente">🔎</button><span class="count" title="${items.length} cartão(ões) · ${countClients(items)} cliente(s) por grupo">${countClients(items)}</span></div>
       <div class="col-body" data-stage="${stage.key}"></div>
       <div class="col-sum">Valor de pedido: ${fmtMoney(totalVal)}</div>
     `;
@@ -3221,6 +3241,50 @@ async function persistLead(lead){
     console.error(err);
     toast("Não foi possível salvar a alteração agora. Tente novamente.", "err");
   }
+}
+
+/* ============================= GANHO POR GRUPO =============================
+   Grupo conta como 1 cliente: se um cliente do grupo é reativado (Ganho), todos
+   os outros códigos do mesmo Cód Grupo vão automaticamente para Ganho. Só age
+   em leads com Cód Grupo preenchido e no mês aberto; registra no histórico de
+   cada cartão movido. Não desfaz nada sozinho: tirar um cartão de Ganho depois
+   não mexe nos outros. */
+async function propagateGanhoToGroups(sourceLeads){
+  if(isMonthFrozen() || !state.meta) return 0;
+  const groups = new Map(); // groupKey -> cod do cliente que ganhou
+  (sourceLeads||[]).forEach(l=>{
+    if(l && l.stage==="ganho" && l.codGrupo!=null && String(l.codGrupo).trim()!=="" && !groups.has(groupKey(l))) groups.set(groupKey(l), l.cod);
+  });
+  if(!groups.size) return 0;
+  const touchedChunks = new Set();
+  let moved = 0;
+  state.leads.forEach(x=>{
+    if(x.stage==="ganho") return;
+    const src = groups.get(groupKey(x));
+    if(!src) return;
+    const fromLabel = (STAGES.find(st=>st.key===x.stage)||{}).label || x.stage;
+    x.stage = "ganho";
+    x.lastTouched = nowISO();
+    pushHist(x, `Movido automaticamente de "${fromLabel}" para "Ganho" — o cliente ${src} do mesmo grupo (Cód Grupo ${x.codGrupo}) foi reativado, então o grupo inteiro conta como ativo.`);
+    moved++;
+    const ci = state.meta.codToChunk ? state.meta.codToChunk[x.cod] : null;
+    if(ci!=null) touchedChunks.add(ci);
+  });
+  for(const ci of touchedChunks){
+    try{
+      const chunk = await Store.getChunk(state.monthKey, ci);
+      (chunk.leads||[]).forEach((cl, idx)=>{
+        const updated = state.leads.find(l=>l.cod===cl.cod);
+        if(updated) chunk.leads[idx] = updated;
+      });
+      await Store.setChunk(state.monthKey, ci, chunk);
+    }catch(err){
+      console.error(err);
+      toast("Não foi possível salvar a movimentação do grupo agora. Tente novamente.", "err");
+    }
+  }
+  if(state._monthCache && state._monthCache[state.monthKey]) state._monthCache[state.monthKey].leads = state.leads;
+  return moved;
 }
 
 /* ============================= OFENSOR DETAIL SUB-FORMS ============================= */
@@ -3479,7 +3543,11 @@ function openStageChangeModal(lead, newStage){
     lead.lastTouched = nowISO();
     pushHist(lead, `Movido de "${fromLabel}" para "${stageLabel}" — ${obs}`);
     await persistLead(lead);
-    toast("Movimentação registrada.");
+    let groupMoved = 0;
+    if(newStage==="ganho") groupMoved = await propagateGanhoToGroups([lead]);
+    toast(groupMoved>0
+      ? `Movimentação registrada. ${groupMoved} outro(s) cliente(s) do mesmo grupo também foram movidos para Ganho.`
+      : "Movimentação registrada.");
     closeModal();
     renderAll();
     // Sempre mostra o histórico de movimentação/observações ao movimentar o card.
@@ -3901,7 +3969,8 @@ function parseWorkbook(buffer){
       valorPedido = cleanNum(rec.pedPend);
     }
     out.push({
-      cod: cleanTxt(rec.cod), cli: cleanTxt(rec.cli), cnpj: cleanTxt(rec.cnpj),
+      cod: cleanTxt(rec.cod), codGrupo: cleanTxt(rec.codGrupo), grp: cleanTxt(rec.grp),
+      cli: cleanTxt(rec.cli), cnpj: cleanTxt(rec.cnpj),
       uf: cleanTxt(rec.uf), cid: cleanTxt(rec.cid), seg: cleanTxt(rec.seg),
       tel: cleanTxt(rec.tel), email: cleanTxt(rec.email),
       temCarteira: cleanTxt(rec.temCarteira), pedPend: cleanNum(rec.pedPend),
@@ -4014,6 +4083,12 @@ function renderImportSummary(file, byMonth, summary){
     await loadMonths();
     const lastMonth = Object.keys(byMonth).sort().slice(-1)[0];
     await setMonth(lastMonth);
+    // Grupos com algum cliente em Ganho (ex.: reativado por faturamento): o
+    // restante do grupo acompanha.
+    try{
+      const gm = await propagateGanhoToGroups(state.leads.filter(l=>l.stage==="ganho"));
+      if(gm>0){ toast(`${gm} cliente(s) movidos para Ganho porque outro cliente do mesmo grupo foi reativado.`); renderAll(); }
+    }catch(err){ console.error(err); }
     // Sanity check: if almost nothing got a Vendedor/Time on this import, the
     // file's column headers probably weren't recognized (Representante/
     // Vendedor Interno/Key Account/Prospect). Warn instead of silently
@@ -4116,7 +4191,7 @@ async function downloadWorkbook(sheets, filename){
 }
 function leadExportRow(l){
   return {
-    "Mês (base)": fmtMonthKey(l.monthKey), "Cliente": l.cli, "Cód Cliente (BP)": l.cod, "CNPJ": l.cnpj, "UF": l.uf, "Cidade": l.cid, "Segmento": l.seg,
+    "Mês (base)": fmtMonthKey(l.monthKey), "Cliente": l.cli, "Cód Cliente (BP)": l.cod, "Cód Grupo": l.codGrupo, "CNPJ": l.cnpj, "UF": l.uf, "Cidade": l.cid, "Segmento": l.seg,
     "Status Atual (ERP)": l.statusErp, "Data Último Faturamento": fmtDate(l.dtUltFat), "Data Inativação": fmtDate(l.dtInat),
     "Valor de pedido": l.valorPedido, "Estágio pipeline": (STAGES.find(s=>s.key===l.stage)||{}).label,
     "Pedido identificado (Qlik)": l.pedidoIdentificado ? (l.pedidoIdentificado.pedidos||[]).join(", ") : "",
@@ -4262,8 +4337,9 @@ async function renderComparativo(){
   const filteredLeadsAll = [];
   for(const m of sorted){
     const {leads} = await ensureMonthLoaded(m.monthKey);
-    const filtered = leads.filter(l=>matchesFilters(l, false));
-    filteredLeadsAll.push(...filtered);
+    const filteredRaw = leads.filter(l=>matchesFilters(l, false));
+    filteredLeadsAll.push(...filteredRaw);
+    const filtered = dedupeByGroup(filteredRaw); // contagens por grupo
     const ganho = filtered.filter(l=>l.status==="ganho").length;
     const perdido = filtered.filter(l=>l.status==="perdido").length;
     const pendente = filtered.filter(l=>!["ganho","perdido"].includes(l.status)).length;
