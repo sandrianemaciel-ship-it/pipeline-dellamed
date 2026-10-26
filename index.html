@@ -3287,6 +3287,52 @@ async function propagateGanhoToGroups(sourceLeads){
   return moved;
 }
 
+// Qualquer movimentação de um cliente que tem Cód Grupo vale para o grupo
+// inteiro, "como se fosse uma coisa só": os outros códigos do mesmo grupo (no
+// mês aberto) vão para o mesmo estágio e recebem os mesmos dados informados na
+// movimentação (resumo do CRM, datas/horário de contato, decisor, WhatsApp,
+// proposta, linhas, ofensor). Cada cartão movido ganha seu registro no
+// histórico. Regra existente preservada: "Inativado" não volta para
+// "Inativam no mês" (esses cartões ficam de fora).
+async function propagateStageToGroup(lead, newStage, updates, ofensorDetail, obs){
+  if(isMonthFrozen() || !state.meta) return 0;
+  if(!lead || lead.codGrupo==null || String(lead.codGrupo).trim()==="") return 0;
+  const key = groupKey(lead);
+  const stageLabel = (STAGES.find(st=>st.key===newStage)||{}).label || newStage;
+  const touchedChunks = new Set();
+  let moved = 0;
+  state.leads.forEach(x=>{
+    if(x===lead || x.cod===lead.cod || groupKey(x)!==key) return;
+    if(x.stage===newStage) return;
+    if(x.stage==="inativo" && newStage==="inativam") return;
+    const fromLabel = (STAGES.find(st=>st.key===x.stage)||{}).label || x.stage;
+    Object.assign(x, updates||{});
+    if(ofensorDetail) x.ofensorDetalhe = ofensorDetail;
+    x.stage = newStage;
+    x.notes = obs;
+    x.lastTouched = nowISO();
+    pushHist(x, `Movido de "${fromLabel}" para "${stageLabel}" junto com o grupo (Cód Grupo ${x.codGrupo}), a partir do cliente ${lead.cod} — ${obs}`);
+    moved++;
+    const ci = state.meta.codToChunk ? state.meta.codToChunk[x.cod] : null;
+    if(ci!=null) touchedChunks.add(ci);
+  });
+  for(const ci of touchedChunks){
+    try{
+      const chunk = await Store.getChunk(state.monthKey, ci);
+      (chunk.leads||[]).forEach((cl, idx)=>{
+        const updated = state.leads.find(l=>l.cod===cl.cod);
+        if(updated) chunk.leads[idx] = updated;
+      });
+      await Store.setChunk(state.monthKey, ci, chunk);
+    }catch(err){
+      console.error(err);
+      toast("Não foi possível salvar a movimentação do grupo agora. Tente novamente.", "err");
+    }
+  }
+  if(state._monthCache && state._monthCache[state.monthKey]) state._monthCache[state.monthKey].leads = state.leads;
+  return moved;
+}
+
 /* ============================= OFENSOR DETAIL SUB-FORMS ============================= */
 // Fields required per ofensor "kind" — the popups/forms the sales team must fill
 // in whenever that ofensor is chosen, per the retention playbook.
@@ -3543,10 +3589,9 @@ function openStageChangeModal(lead, newStage){
     lead.lastTouched = nowISO();
     pushHist(lead, `Movido de "${fromLabel}" para "${stageLabel}" — ${obs}`);
     await persistLead(lead);
-    let groupMoved = 0;
-    if(newStage==="ganho") groupMoved = await propagateGanhoToGroups([lead]);
+    const groupMoved = await propagateStageToGroup(lead, newStage, updates, ofensorDetail, obs);
     toast(groupMoved>0
-      ? `Movimentação registrada. ${groupMoved} outro(s) cliente(s) do mesmo grupo também foram movidos para Ganho.`
+      ? `Movimentação registrada. ${groupMoved} outro(s) cliente(s) do mesmo grupo foram movidos junto para "${stageLabel}".`
       : "Movimentação registrada.");
     closeModal();
     renderAll();
@@ -4506,18 +4551,36 @@ async function applyAutoInativoTransitions(){
   if(!state.meta || !state.leads.length || isMonthFrozen()) return;
   const touchedChunks = new Set();
   let anyChange = false;
+  const markTouched = (l)=>{
+    const ci = state.meta.codToChunk ? state.meta.codToChunk[l.cod] : null;
+    if(ci!=null) touchedChunks.add(ci);
+  };
+  // Grupo = 1 cliente, ativo enquanto algum código ainda não atingiu a Data de
+  // Inativação: um código com Cód Grupo só vai para "Inativado" quando TODOS
+  // os códigos do grupo (no mês) já atingiram a data — e aí os que estão em
+  // "Inativam no mês" vão juntos. Cartões do grupo já trabalhados (contato,
+  // proposta etc.) não são mexidos. Sem Cód Grupo, vale a regra individual.
+  const isDue = (l)=>{ const d = daysUntil(l.dtInat); return d!=null && d<=0; };
+  const groupMembers = new Map();
   state.leads.forEach(l=>{
-    if(l.stage==="inativam"){
-      const d = daysUntil(l.dtInat);
-      if(d!=null && d<=0){
-        l.stage = "inativo";
-        l.lastTouched = nowISO();
-        pushHist(l, `Movido automaticamente para "Inativado" — data de inativação (${fmtDate(l.dtInat)}) já foi atingida.`);
-        anyChange = true;
-        const ci = state.meta.codToChunk ? state.meta.codToChunk[l.cod] : null;
-        if(ci!=null) touchedChunks.add(ci);
-      }
+    if(l.codGrupo!=null && String(l.codGrupo).trim()!==""){
+      const k = groupKey(l);
+      if(!groupMembers.has(k)) groupMembers.set(k, []);
+      groupMembers.get(k).push(l);
     }
+  });
+  const groupAllDue = (l)=> (groupMembers.get(groupKey(l))||[l]).every(isDue);
+  state.leads.forEach(l=>{
+    if(l.stage!=="inativam" || !isDue(l)) return;
+    const inGroup = l.codGrupo!=null && String(l.codGrupo).trim()!=="";
+    if(inGroup && !groupAllDue(l)) return; // grupo ainda tem código antes da data: segue ativo
+    l.stage = "inativo";
+    l.lastTouched = nowISO();
+    pushHist(l, inGroup
+      ? `Movido automaticamente para "Inativado" — todos os clientes do grupo (Cód Grupo ${l.codGrupo}) já atingiram a data de inativação.`
+      : `Movido automaticamente para "Inativado" — data de inativação (${fmtDate(l.dtInat)}) já foi atingida.`);
+    anyChange = true;
+    markTouched(l);
   });
   if(!anyChange) return;
   for(const ci of touchedChunks){
